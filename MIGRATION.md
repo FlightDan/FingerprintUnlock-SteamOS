@@ -15,3 +15,10 @@ not create a Git repository. The installer does not yet bind its snapshot to an
 independent repository commit. Before switching installer inputs,
 review and pin an actual public commit, retain licenses and source verification,
 and separately validate installation, maintenance, recovery, and hardware.
+
+The standalone source includes an installer for an existing standard Decky
+installation and independently installed fprintd commands. Installation,
+upgrade, removal, duplicate detection, executable-path checks and restart
+failure recovery have synthetic coverage, including Linux temporary fixtures.
+Actual standard Decky installation and physical-device acceptance remain open.
+The Boiler-managed OXP3 Decky path continues to use Boiler maintenance.
