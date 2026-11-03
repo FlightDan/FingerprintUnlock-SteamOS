@@ -46,6 +46,15 @@ class VerificationTests(unittest.IsolatedAsyncioTestCase):
         plugin = bridge.Plugin(); plugin.lock = asyncio.Lock(); plugin.verify_path = 'fixture'
         for code, output, reason, expected in [
             (None, '', 'timeout', 'timeout'),
+            (1, 'Verify result: verify-unknown-error (done)\n', None, 'device-error'),
+            (0, 'Verify result: verify-unknown-error (done)\n', None, 'error'),
+            (1, 'Verify result: verify-unknown-error (not done)\n', None, 'error'),
+            (1, 'Verify result: verify-disconnected (done)\n', None, 'error'),
+            (1, 'VerifyStart failed: fixture\n', None, 'error'),
+            (1, 'Verify result: verify-unknown-error (done)\nVerifyStop failed: fixture\n', None, 'error'),
+            (1, 'Verify result: verify-unknown-error (done)\nVerify result: verify-match (done)\n', None, 'error'),
+            (1, 'Verify result: verify-unknown-error (done)\nVerify result: verify-unknown-error (done)\n', None, 'error'),
+            (1, 'Verify result: verify-unknown-error (done)\n', 'cancelled', 'cancelled'),
             (1, 'Verify result: verify-no-match (done)\n', None, 'no-match'),
             (0, 'Verify result: verify-no-match (done)\n', None, 'error'),
             (1, 'Verify result: verify-match (done)\n', None, 'error'),

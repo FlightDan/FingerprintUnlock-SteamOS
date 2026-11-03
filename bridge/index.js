@@ -74,7 +74,7 @@ const key = 'boiler.fingerprint.enabled';
 const enabled = () => { try { return localStorage.getItem(key) === '1'; } catch { return false; } };
 const store = () => window.securitystore;
 const locked = () => { try { return !!store()?.IsLockScreenActive(); } catch { return false; } };
-let generation = 0, previous = false, timer, retryTimer, inFlight = false, mounted = true;
+let generation = 0, previous = false, timer, retryTimer, inFlight = false, mounted = true, deviceRetries = 0;
 let cancelBarrier = Promise.resolve(), visualState = null, successTimer;
 // Capture the actual lock-screen container before Steam starts its exit transition.
 function lockScreenElement() {
@@ -165,6 +165,9 @@ async function attempt() {
     } else if (response?.result === 'unavailable' && ['timeout', 'no-match'].includes(response.reason)) {
       show(response.reason === 'no-match' ? 'no-match' : 'retrying');
       schedule(current, response.reason === 'no-match' ? 1050 : 500);
+    } else if (response?.result === 'unavailable' && response.reason === 'device-error' && deviceRetries < 2) {
+      const delay = [1000, 3000][deviceRetries++];
+      show('retrying'); schedule(current, delay);
     } else { show('unavailable'); }
   } catch (_) { if (current === generation && mounted && enabled() && locked()) show('unavailable'); }
   finally { inFlight = false; }
@@ -179,13 +182,13 @@ function Content() {
   return SP_REACT.createElement(DFL.PanelSection, {title:'Fingerprint / 指纹'},
     SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ToggleField, {
       label:'Fingerprint unlock / 指纹解锁', description:'Experimental, off by default / 实验功能，默认关闭', checked:on,
-      onChange: value => { try { localStorage.setItem(key, value ? '1':'0'); } catch (_) {} setOn(enabled()); if (!value) abort(); else if (locked()) { abort(); attempt(); } }
+      onChange: value => { try { localStorage.setItem(key, value ? '1':'0'); } catch (_) {} setOn(enabled()); if (!value) abort(); else if (locked()) { if (!previous) { previous = true; deviceRetries = 0; } abort(); attempt(); } }
     })),
     row('Status / 状态', status ? (status.available ? (status.enrolled ? 'Enrolled / 已录入' : 'No prints / 未录入') : 'Unavailable / 不可用') : 'Checking / 检查中'),
     row('Enroll / 录入', 'Desktop → System Settings → Users → Configure Fingerprints / 桌面 → 系统设置 → 用户 → 配置指纹'),
     SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {onClick:refresh}, 'Refresh / 刷新')),
     SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {onClick:() => { const sec=store(); if (sec) sec.SetActiveLockScreenProps({preventCancel:false}); }}, 'Test lock (B to cancel) / 测试锁屏（B 取消）')));
 }
-  timer = setInterval(() => { const active = locked(); if (active !== previous) { previous = active; if (active && enabled()) { if (successTimer) stopSuccess(); attempt(); } else abort(!active && !!successTimer); } else if (active && enabled() && visualState && visualState !== 'success') { visual.render(visualState); } }, 300);
+  timer = setInterval(() => { const active = locked(); if (active !== previous) { previous = active; if (active) deviceRetries = 0; if (active && enabled()) { if (successTimer) stopSuccess(); attempt(); } else abort(!active && !!successTimer); } else if (active && enabled() && visualState && visualState !== 'success') { visual.render(visualState); } }, 300);
   return {name:'Boiler Fingerprint Unlock', titleView:SP_REACT.createElement('div', null, 'Fingerprint / 指纹'), content:SP_REACT.createElement(Content), icon:SP_REACT.createElement('div', null, '◉'), onDismount(){mounted = false; clearInterval(timer); abort();}};
 };

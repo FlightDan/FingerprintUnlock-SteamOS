@@ -49,3 +49,19 @@ active=false;clock=0;const plugin4=module.default();plugin4.content.type();activ
 assert.equal(body.children.length,2);screen.isConnected=false;await fire(50);assert.deepEqual(body.children,[keypad]);screen.isConnected=true;
 active=false;tick();active=true;tick();await flush();await finish({result:'match'});toggle(false);assert.deepEqual(body.children,[keypad]);assert.equal(timers.size,0);
 toggle(true);await flush();await finish({result:'match'});assert.equal(body.children.length,2);plugin4.onDismount();assert.deepEqual(body.children,[keypad]);assert.equal(timers.size,0);
+
+// Unknown device failures retry only twice in a lock session, with bounded delays.
+active=false;const plugin5=module.default();plugin5.content.type();active=true;tick();await flush();
+await finish({result:'unavailable',reason:'device-error'});assert.ok([...timers.values()].some(t=>t.ms===1000));await fire(1000);
+await finish({result:'unavailable',reason:'device-error'});assert.ok([...timers.values()].some(t=>t.ms===3000));await fire(3000);
+await finish({result:'unavailable',reason:'device-error'});assert.equal(timers.size,0);const afterExhaustion=calls;
+// Toggling cannot reset the budget within the same lock screen.
+toggle(false);toggle(true);await flush();await finish({result:'unavailable',reason:'device-error'});assert.equal(timers.size,0);assert.equal(calls,afterExhaustion+1);
+// A new lock restores the budget; disable cancels an outstanding delayed retry.
+active=false;tick();active=true;tick();await flush();await finish({result:'unavailable',reason:'device-error'});assert.ok([...timers.values()].some(t=>t.ms===1000));
+toggle(false);assert.equal(timers.size,0);toggle(true);await flush();await finish({result:'unavailable',reason:'device-error'});assert.ok([...timers.values()].some(t=>t.ms===3000));
+// Unlock and relock cancel an old timer and start a fresh session.
+active=false;tick();assert.equal(timers.size,0);active=true;tick();await flush();await finish({result:'unavailable',reason:'device-error'});await fire(1000);await finish({result:'match'});
+assert.equal(successes,8);active=false;tick();screen.isConnected=false;await fire(50);screen.isConnected=true;
+// Unload cancels the retry and cannot trigger subsequent attempts.
+active=true;tick();await flush();await finish({result:'unavailable',reason:'device-error'});assert.ok([...timers.values()].some(t=>t.ms===1000));plugin5.onDismount();assert.equal(timers.size,0);

@@ -67,6 +67,10 @@ class Plugin:
                 return {'result': 'match'}
             if code == 1 and len(results) == 1 and results[0].strip() == 'verify-no-match (done)':
                 reason = 'no-match'
+            elif (reason is None and code == 1 and len(results) == 1
+                  and results[0].strip() == 'verify-unknown-error (done)'
+                  and not re.search(r'^(?:VerifyStart|VerifyStop) failed:', text, re.M)):
+                reason = 'device-error'
             return {'result': 'unavailable', 'reason': reason or 'error'}
 
     async def cancel(self):
