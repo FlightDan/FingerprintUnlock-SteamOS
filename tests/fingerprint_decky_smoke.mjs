@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {pathToFileURL} from 'node:url'; import {resolve} from 'node:path';
 let tick, active=false, successes=0, clears=0, calls=0, connections=0, pending=[], timers=new Map(), next=0, toggle, delayCancel=false, releaseCancel, reduced=false, animations=0, cancels=0, animationLog=[];
-const settings=new Map(); globalThis.localStorage={getItem:k=>settings.get(k),setItem:(k,v)=>settings.set(k,v)};
+const settings=new Map([['boiler.fingerprint.enabled','0']]); globalThis.localStorage={getItem:k=>settings.has(k)?settings.get(k):null,setItem:(k,v)=>settings.set(k,v)};
 globalThis.setInterval=fn=>(tick=fn,1); globalThis.clearInterval=()=>{};
 globalThis.setTimeout=(fn,ms)=>{const id=++next;timers.set(id,{fn,ms});return id};globalThis.clearTimeout=id=>timers.delete(id);
 globalThis.SP_REACT={createElement:(type,props,...children)=>{if(type==='Toggle')toggle=props.onChange;return {type,props,children}},useState:v=>[v,()=>{}],useEffect:()=>{}};globalThis.DFL={ToggleField:'Toggle'};
@@ -82,3 +82,13 @@ globalThis.document.documentElement.lang='';DFL.findSP=()=>({document:doc,locati
 
 // Opening the panel while locked does not issue a status query.
 active=true;SP_REACT.useEffect=fn=>{panelEffect=fn};const lockedPanel=module.default();lockedPanel.content.type();const disposeLocked=panelEffect();await flush();assert.equal(statusRequests,1);disposeLocked();lockedPanel.onDismount();active=false;
+
+// First use defaults on; explicit disable survives remount and invalid settings fail closed.
+let toggleProps;const savedCreate=SP_REACT.createElement;SP_REACT.createElement=(type,props,...children)=>{if(type==='Toggle')toggleProps=props;return savedCreate(type,props,...children)};
+let firstVerify=0;window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect=()=>({callable:method=>method==='verify'?async()=>{firstVerify++;return {result:'unavailable',reason:'error'}}:async()=>({})});
+settings.delete('boiler.fingerprint.enabled');const firstPlugin=module.default();firstPlugin.content.type();assert.equal(toggleProps.checked,true);active=true;tick();await flush();assert.equal(firstVerify,1);active=false;tick();toggleProps.onChange(false);assert.equal(settings.get('boiler.fingerprint.enabled'),'0');firstPlugin.onDismount();
+const reloadedPlugin=module.default();reloadedPlugin.content.type();assert.equal(toggleProps.checked,false);reloadedPlugin.onDismount();
+for(const value of ['invalid','', 'true']){settings.set('boiler.fingerprint.enabled',value);const badPlugin=module.default();badPlugin.content.type();assert.equal(toggleProps.checked,false);badPlugin.onDismount()}
+settings.set('boiler.fingerprint.enabled','1');const enabledPlugin=module.default();enabledPlugin.content.type();assert.equal(toggleProps.checked,true);enabledPlugin.onDismount();
+const savedStorage=globalThis.localStorage;globalThis.localStorage={getItem(){throw Error('denied')},setItem(){throw Error('denied')}};const deniedPlugin=module.default();deniedPlugin.content.type();assert.equal(toggleProps.checked,false);deniedPlugin.onDismount();
+globalThis.localStorage={getItem(){return null},setItem(){throw Error('denied')}};const writeDeniedPlugin=module.default();writeDeniedPlugin.content.type();assert.equal(toggleProps.checked,true);toggleProps.onChange(false);writeDeniedPlugin.content.type();assert.equal(toggleProps.checked,false);writeDeniedPlugin.onDismount();globalThis.localStorage=savedStorage;SP_REACT.createElement=savedCreate;

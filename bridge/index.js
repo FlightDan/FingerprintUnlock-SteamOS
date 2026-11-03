@@ -83,10 +83,10 @@ function steamLanguage() {
   try { return fingerprintLanguage(globalThis.navigator?.language); } catch (_) { return 'en'; }
 }
 const panelText = {
-  en: {title:'Fingerprint', toggle:'Fingerprint unlock', description:'Experimental, off by default', status:'Status',
+  en: {title:'Fingerprint', toggle:'Fingerprint unlock', description:'Experimental', status:'Status',
     enrolled:'Enrolled', empty:'No prints', unavailable:'Unavailable', checking:'Checking', enroll:'Enroll',
     guide:'Desktop → System Settings → Users → Configure Fingerprints'},
-  zh: {title:'指纹', toggle:'指纹解锁', description:'实验功能，默认关闭', status:'状态',
+  zh: {title:'指纹', toggle:'指纹解锁', description:'实验功能', status:'状态',
     enrolled:'已录入', empty:'未录入', unavailable:'不可用', checking:'检查中', enroll:'录入',
     guide:'桌面 → 系统设置 → 用户 → 配置指纹'}
 };
@@ -98,7 +98,8 @@ try { api = internal.connect(2, 'Boiler Fingerprint Unlock'); }
 catch (_) { api = internal.connect(1, 'Boiler Fingerprint Unlock'); }
 const backend = { verify: api.callable('verify'), cancel: api.callable('cancel'), status: api.callable('status') };
 const key = 'boiler.fingerprint.enabled';
-const enabled = () => { try { return localStorage.getItem(key) === '1'; } catch { return false; } };
+let settingsFault = false;
+const enabled = () => { if (settingsFault) return false; try { const value = localStorage.getItem(key); return value === null || value === '1'; } catch { settingsFault = true; return false; } };
 const store = () => window.securitystore;
 const locked = () => { try { return !!store()?.IsLockScreenActive(); } catch { return false; } };
 let generation = 0, previous = false, timer, retryTimer, inFlight = false, mounted = true, deviceRetries = 0;
@@ -220,7 +221,7 @@ function Content() {
   return SP_REACT.createElement(DFL.PanelSection, {title:text.title},
     SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ToggleField, {
       label:text.toggle, description:text.description, checked:on,
-      onChange: value => { try { localStorage.setItem(key, value ? '1':'0'); } catch (_) {} setOn(enabled()); if (!value) abort(); else if (locked()) { if (!previous) { previous = true; deviceRetries = 0; } abort(); attempt(); } }
+      onChange: value => { try { localStorage.setItem(key, value ? '1':'0'); } catch (_) { settingsFault = true; } setOn(enabled()); if (!value || !enabled()) abort(); else if (locked()) { if (!previous) { previous = true; deviceRetries = 0; } abort(); attempt(); } }
     })),
     row(text.status, status ? (status.available ? (status.enrolled ? text.enrolled : text.empty) : text.unavailable) : text.checking),
     row(text.enroll, text.guide));
