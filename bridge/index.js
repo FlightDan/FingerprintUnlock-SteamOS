@@ -54,13 +54,14 @@ export function createFingerprintStatusRenderer(getDocument, getLayout) {
         if (!reduce && state === 'no-match' && typeof node.animate === 'function')
           animation = node.animate([{transform:'translateX(0)'},{transform:'translateX(-5px)'},{transform:'translateX(5px)'},{transform:'translateX(-2px)'},{transform:'translateX(0)'}], {duration:340, easing:'ease-out'});
         if (!reduce && state === 'success' && typeof halo.animate === 'function')
-          animation = halo.animate([{opacity:0,transform:'scale(.7)'},{opacity:.22,transform:'scale(1)'},{opacity:0,transform:'scale(1.25)'}], {duration:200,easing:'ease-out'});
+          animation = halo.animate([{opacity:0,transform:'scale(.7)'},{opacity:.22,transform:'scale(1)'},{opacity:0,transform:'scale(1.25)'}], {duration:600,easing:'ease-out',iterations:Infinity});
         lastState = state;
       }
       return true;
     } catch (_) { remove(); return false; }
   }
-  return {render, remove};
+  function setOpacity(value) { if (node) node.style.opacity = String(value); }
+  return {render, remove, setOpacity};
 }
 
 export default () => {
@@ -75,6 +76,44 @@ const store = () => window.securitystore;
 const locked = () => { try { return !!store()?.IsLockScreenActive(); } catch { return false; } };
 let generation = 0, previous = false, timer, retryTimer, inFlight = false, mounted = true;
 let cancelBarrier = Promise.resolve(), visualState = null, successTimer;
+// Capture the actual lock-screen container before Steam starts its exit transition.
+function lockScreenElement() {
+  try {
+    const doc = DFL.findSP()?.document;
+    const classes = DFL.findModule(m => m && typeof m === 'object' &&
+      ['Container','Indicators','DigitIndicator','NumericButtonInput','ForgotPINButton'].every(k => typeof m[k] === 'string'));
+    return doc && classes ? doc.querySelector('.' + classes.Indicators)?.closest('.' + classes.Container) || null : null;
+  } catch (_) { return null; }
+}
+function lockScreenOpacity(element) {
+  try {
+    if (!element || !element.isConnected) return null;
+    const view = element.ownerDocument?.defaultView;
+    if (!view) return null;
+    let opacity = 1;
+    for (let node = element; node && node.nodeType === 1; node = node.parentElement) {
+      const style = view.getComputedStyle(node), value = Number(style.opacity);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || !Number.isFinite(value)) return null;
+      opacity *= Math.max(0, Math.min(1, value));
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && opacity > 0 ? opacity : null;
+  } catch (_) { return null; }
+}
+function stopSuccess() {
+  clearTimeout(successTimer); successTimer = undefined; visualState = null; visual.remove();
+}
+function watchSuccess(element) {
+  // The deadline is a cleanup fallback if Steam leaves an invisible/stale DOM mounted.
+  const deadline = Date.now() + 10000;
+  function check() {
+    const opacity = lockScreenOpacity(element);
+    if (!mounted || !enabled() || opacity === null || Date.now() >= deadline) { stopSuccess(); return; }
+    visual.setOpacity(opacity);
+    successTimer = setTimeout(check, 50);
+  }
+  check();
+}
 const visual = createFingerprintStatusRenderer(
   () => { try { return DFL.findSP()?.document || null; } catch (_) { return null; } },
   doc => {
@@ -99,7 +138,7 @@ const visual = createFingerprintStatusRenderer(
 function show(state) { visualState = state; visual.render(state); }
 function abort(preserveSuccess = false) {
   generation++; clearTimeout(retryTimer); retryTimer = undefined;
-  if (!preserveSuccess) { clearTimeout(successTimer); successTimer = undefined; visualState = null; visual.remove(); }
+  if (!preserveSuccess) stopSuccess();
   cancelBarrier = cancelBarrier.then(() => backend.cancel()).catch(() => {});
 }
 function schedule(current, delay = 500) {
@@ -117,11 +156,12 @@ async function attempt() {
     const response = await backend.verify(30);
     if (current !== generation || !mounted || !enabled() || !locked()) return;
     if (response?.result === 'match') {
+      const screen = lockScreenElement();
       show('success');
       const sec = store(), props = sec.GetActiveLockScreenProps();
       if (typeof props?.onSuccess === 'function') props.onSuccess();
       sec.SetActiveLockScreenProps(null);
-      successTimer = setTimeout(() => { successTimer = undefined; visualState = null; visual.remove(); }, 200);
+      watchSuccess(screen);
     } else if (response?.result === 'unavailable' && ['timeout', 'no-match'].includes(response.reason)) {
       show(response.reason === 'no-match' ? 'no-match' : 'retrying');
       schedule(current, response.reason === 'no-match' ? 1050 : 500);
@@ -146,6 +186,6 @@ function Content() {
     SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {onClick:refresh}, 'Refresh / 刷新')),
     SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {onClick:() => { const sec=store(); if (sec) sec.SetActiveLockScreenProps({preventCancel:false}); }}, 'Test lock (B to cancel) / 测试锁屏（B 取消）')));
 }
-  timer = setInterval(() => { const active = locked(); if (active !== previous) { previous = active; if (active && enabled()) { if (successTimer) { clearTimeout(successTimer); successTimer = undefined; visualState = null; visual.remove(); } attempt(); } else abort(!active && !!successTimer); } else if (active && enabled() && visualState) { visual.render(visualState); } }, 300);
+  timer = setInterval(() => { const active = locked(); if (active !== previous) { previous = active; if (active && enabled()) { if (successTimer) stopSuccess(); attempt(); } else abort(!active && !!successTimer); } else if (active && enabled() && visualState && visualState !== 'success') { visual.render(visualState); } }, 300);
   return {name:'Boiler Fingerprint Unlock', titleView:SP_REACT.createElement('div', null, 'Fingerprint / 指纹'), content:SP_REACT.createElement(Content), icon:SP_REACT.createElement('div', null, '◉'), onDismount(){mounted = false; clearInterval(timer); abort();}};
 };

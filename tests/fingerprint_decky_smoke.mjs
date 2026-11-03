@@ -15,12 +15,15 @@ const renderer=module.createFingerprintStatusRenderer(()=>doc,()=>layout);
 for(const state of ['waiting','retrying','unavailable']){assert.equal(renderer.render(state),true);const n=body.children[1];assert.equal(n.style.color,layout.color);assert.equal(n.style.left,'333px');assert.equal(n.style.top,'572px');assert.equal(n.style.pointerEvents,'none');assert.equal(doc.activeElement,focus);assert.equal(body.children[0],keypad)}
 assert.equal(renderer.render('no-match'),true);assert.equal(body.children[1].style.color,'#cf6b6b');assert.equal(animations,1);renderer.render('no-match');assert.equal(animations,1);
 assert.equal(animationLog[0].options.duration,340);assert.ok(animationLog[0].frames.some(f=>f.transform==='translateX(-5px)'));
-renderer.render('success');assert.equal(body.children[1].style.color,'#78b985');assert.equal(cancels,1);assert.equal(animationLog[1].tag,'circle');assert.equal(animationLog[1].options.duration,200);assert.equal(animationLog[1].frames[1].opacity,.22);assert.equal(successes,0);assert.equal(clears,0);assert.equal(calls,0);
+renderer.render('success');assert.equal(body.children[1].style.color,'#78b985');assert.equal(cancels,1);assert.equal(animationLog[1].tag,'circle');assert.equal(animationLog[1].options.duration,600);assert.equal(animationLog[1].options.iterations,Infinity);assert.equal(animationLog[1].frames[1].opacity,.22);assert.equal(successes,0);assert.equal(clears,0);assert.equal(calls,0);
 reduced=true;renderer.render('no-match');renderer.render('success');assert.equal(animations,2);reduced=false;renderer.render('no-match');const beforeRemove=cancels;renderer.remove();assert.equal(cancels,beforeRemove+1);assert.deepEqual(body.children,[keypad]);
 const original=layout;layout={...original,blocked:[{left:300,right:400,top:570,bottom:650}]};assert.equal(renderer.render('waiting'),false);layout={...original,blocked:[{left:300,right:400,top:600,bottom:750}]};assert.equal(renderer.render('waiting'),false);layout={...original,digit:null};assert.equal(renderer.render('waiting'),false);layout=original;
 layout={...original,blocked:[{left:394,right:450,top:570,bottom:650}]};assert.equal(renderer.render('waiting'),true);assert.equal(renderer.render('no-match'),false);layout=original;
-let footerRects=[];
-const rect=r=>({getBoundingClientRect:()=>r}); doc.querySelector=sel=>sel==='.indicators'?rect(layout.indicators):sel==='.digit'?rect(layout.digit):null;doc.querySelectorAll=sel=>sel==='.key'? [rect(layout.blocked[0])]:sel==='.footer'?footerRects.map(rect):[];
+let footerRects=[], screenPresent=true, screenOpacity='1', parentOpacity='1', clock=0;
+Date.now=()=>clock;
+const parent={nodeType:1,parentElement:null};const screen={nodeType:1,isConnected:true,ownerDocument:doc,parentElement:parent,getBoundingClientRect:()=>({width:1000,height:700})};
+const originalComputed=doc.defaultView.getComputedStyle;doc.defaultView.getComputedStyle=el=>el===screen?{display:'block',visibility:'visible',opacity:screenOpacity}:el===parent?{display:'block',visibility:'visible',opacity:parentOpacity}:originalComputed(el);
+const rect=r=>({getBoundingClientRect:()=>r,closest:()=>screenPresent?screen:null}); doc.querySelector=sel=>sel==='.indicators'?rect(layout.indicators):sel==='.digit'?rect(layout.digit):null;doc.querySelectorAll=sel=>sel==='.key'? [rect(layout.blocked[0])]:sel==='.footer'?footerRects.map(rect):[];
 DFL.findSP=()=>({document:doc});DFL.findModule=predicate=>{const c={Container:'container',Indicators:'indicators',DigitIndicator:'digit',NumericButtonInput:'key',ForgotPINButton:'footer'};return predicate(c)?c:null};
 const plugin=module.default();plugin.content.type();const flush=async()=>{await new Promise(r=>setImmediate(r))};const finish=async r=>{pending.shift()(r);await flush()};const fire=async ms=>{const [id,t]=[...timers].find(([,t])=>t.ms===ms);timers.delete(id);t.fn();await flush()};
 active=true;tick();await flush();assert.equal(calls,0);delayCancel=true;toggle(true);await flush();assert.equal(calls,0);delayCancel=false;releaseCancel({});await flush();assert.equal(calls,1);
@@ -28,8 +31,21 @@ assert.equal(body.children.length,2); // Game mode: keypad present, footer absen
 footerRects=[{left:300,right:400,top:570,bottom:650}];tick();assert.deepEqual(body.children,[keypad]);
 footerRects=[];tick();assert.equal(body.children.length,2);
 await finish({result:'unavailable',reason:'timeout'});await fire(500);assert.equal(calls,2);await finish({result:'unavailable',reason:'no-match'});assert.equal(body.children[1].style.color,'#cf6b6b');await fire(1050);assert.equal(calls,3);assert.equal(body.children[1].style.color,layout.color);
-await finish({result:'match'});assert.equal(successes,1);assert.equal(clears,1);assert.equal(body.children[1].style.color,'#78b985');assert.ok([...timers.values()].some(t=>t.ms===200));active=false;tick();assert.equal(body.children.length,2);await fire(200);assert.deepEqual(body.children,[keypad]);
+await finish({result:'match'});assert.equal(successes,1);assert.equal(clears,1);assert.equal(body.children[1].style.color,'#78b985');assert.ok([...timers.values()].some(t=>t.ms===50));active=false;tick();assert.equal(body.children.length,2);await fire(50);assert.equal(body.children.length,2);screenOpacity='.5';parentOpacity='.5';await fire(50);assert.equal(body.children[1].style.opacity,'0.25');parentOpacity='1';screenOpacity='0';await fire(50);assert.deepEqual(body.children,[keypad]);screenOpacity='1';
 active=true;tick();await flush();assert.equal(calls,4);await finish({result:'unavailable',reason:'error'});assert.equal(timers.size,0);active=false;tick();active=true;tick();await flush();assert.equal(calls,5);toggle(false);assert.deepEqual(body.children,[keypad]);await finish({result:'match'});assert.equal(successes,1);
 toggle(true);await flush();assert.equal(calls,6);active=false;tick();await finish({result:'match'});assert.equal(successes,1);active=true;tick();await flush();assert.equal(calls,7);active=false;tick();active=true;tick();assert.equal(calls,7);await finish({result:'match'});await fire(500);assert.equal(calls,8);
-await finish({result:'match'});assert.equal(successes,2);assert.equal(body.children[1].style.color,'#78b985');active=false;tick();active=true;tick();assert.deepEqual(body.children,[keypad]);await flush();assert.equal(calls,9);assert.equal(body.children[1].style.color,layout.color);assert.ok(![...timers.values()].some(t=>t.ms===200));
+await finish({result:'match'});assert.equal(successes,2);assert.equal(body.children[1].style.color,'#78b985');active=false;tick();active=true;tick();assert.deepEqual(body.children,[keypad]);await flush();assert.equal(calls,9);assert.equal(body.children[1].style.color,layout.color);assert.ok(![...timers.values()].some(t=>t.ms===50));
 await finish({result:'unavailable',reason:'no-match'});const beforeUnload=cancels;plugin.onDismount();assert.equal(cancels,beforeUnload+1);assert.deepEqual(body.children,[keypad]);assert.equal(successes,2);
+
+// Success with no capturable DOM cleans up immediately without delaying unlock.
+active=false;screenPresent=false;const plugin2=module.default();plugin2.content.type();toggle(true);active=true;tick();await flush();
+await finish({result:'match'});assert.equal(successes,3);assert.deepEqual(body.children,[keypad]);assert.equal(timers.size,0);plugin2.onDismount();
+// A stale mounted DOM cannot retain the decoration forever.
+active=false;screenPresent=true;clock=0;const plugin3=module.default();plugin3.content.type();active=true;tick();await flush();await finish({result:'match'});
+assert.equal(successes,4);assert.equal(body.children.length,2);active=false;tick();clock=10001;await fire(50);assert.deepEqual(body.children,[keypad]);plugin3.onDismount();
+
+// Detachment, disabling and unloading all remove an active success decoration.
+active=false;clock=0;const plugin4=module.default();plugin4.content.type();active=true;tick();await flush();await finish({result:'match'});
+assert.equal(body.children.length,2);screen.isConnected=false;await fire(50);assert.deepEqual(body.children,[keypad]);screen.isConnected=true;
+active=false;tick();active=true;tick();await flush();await finish({result:'match'});toggle(false);assert.deepEqual(body.children,[keypad]);assert.equal(timers.size,0);
+toggle(true);await flush();await finish({result:'match'});assert.equal(body.children.length,2);plugin4.onDismount();assert.deepEqual(body.children,[keypad]);assert.equal(timers.size,0);
