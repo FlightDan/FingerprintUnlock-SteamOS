@@ -19,6 +19,13 @@ class Result:
 
 
 class InstallTests(unittest.TestCase):
+    def test_shell_scripts_use_lf_line_endings(self):
+        root = SCRIPT.parents[1]
+        for path in (root / 'install.sh', root / 'install-online.sh',
+                     root / 'tests/test_install_online.sh'):
+            with self.subTest(path=path):
+                self.assertNotIn(b'\r', path.read_bytes())
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
