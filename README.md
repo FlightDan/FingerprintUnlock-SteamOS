@@ -1,8 +1,8 @@
 # Fingerprint Unlock for SteamOS
 
-![Lock screen preview (mockup)](assets/preview.png)
+![Lock screen preview with avatar concealed](assets/preview.png)
 
-A Decky plugin for unlocking SteamOS with a fingerprint while keeping PIN unlock available. The image above is a mockup; compatibility depends on your device and fingerprint driver.
+A Decky plugin for unlocking SteamOS with a fingerprint while keeping PIN unlock available. The preview is based on an OXP3 screenshot; AI editing concealed the avatar and redrew portions of the image. Compatibility depends on your device and fingerprint driver.
 
 ## Installation
 
