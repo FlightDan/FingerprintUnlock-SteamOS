@@ -9,7 +9,7 @@ A Decky plugin for unlocking SteamOS with a fingerprint while keeping PIN unlock
 Install Decky Loader, your fingerprint driver and fprintd first, and enroll a fingerprint. Run as your normal user:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/FlightDan/FingerprintUnlock-SteamOS/86f4d757dd4c3acdff2e2c04f1314aa787311595/install-online.sh | sh
+curl -fsSL https://raw.githubusercontent.com/FlightDan/FingerprintUnlock-SteamOS/2c2578cffd68c2eed4add069fa4b677948ba67e5/install-online.sh | sh
 ```
 
 For an offline checkout, run from the repository directory:
