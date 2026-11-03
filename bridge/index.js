@@ -64,6 +64,33 @@ export function createFingerprintStatusRenderer(getDocument, getLayout) {
   return {render, remove, setOpacity};
 }
 
+// Prefer Steam's observed document language; SP URL and navigator are fallbacks.
+export function fingerprintLanguage(value) {
+  const language = String(value || '').trim().toLowerCase().replaceAll('_', '-');
+  return language === 'schinese' || language === 'tchinese' || language === 'zh' || language.startsWith('zh-') ? 'zh' : 'en';
+}
+function steamLanguage() {
+  try {
+    const lang = globalThis.document?.documentElement?.lang;
+    if (lang) return fingerprintLanguage(lang);
+  } catch (_) {}
+  try {
+    const params = new URLSearchParams(DFL.findSP()?.location?.search || '');
+    for (const [key, value] of params) {
+      if (key.toUpperCase() === 'LANGUAGE' && value) return fingerprintLanguage(value);
+    }
+  } catch (_) {}
+  try { return fingerprintLanguage(globalThis.navigator?.language); } catch (_) { return 'en'; }
+}
+const panelText = {
+  en: {title:'Fingerprint', toggle:'Fingerprint unlock', description:'Experimental, off by default', status:'Status',
+    enrolled:'Enrolled', empty:'No prints', unavailable:'Unavailable', checking:'Checking', enroll:'Enroll',
+    guide:'Desktop → System Settings → Users → Configure Fingerprints'},
+  zh: {title:'指纹', toggle:'指纹解锁', description:'实验功能，默认关闭', status:'状态',
+    enrolled:'已录入', empty:'未录入', unavailable:'不可用', checking:'检查中', enroll:'录入',
+    guide:'桌面 → 系统设置 → 用户 → 配置指纹'}
+};
+
 export default () => {
 const internal = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit;
 let api;
@@ -175,20 +202,29 @@ async function attempt() {
 function Content() {
   const [on, setOn] = SP_REACT.useState(enabled());
   const [status, setStatus] = SP_REACT.useState(null);
-  const refresh = async () => { try { setStatus(await backend.status()); } catch (_) { setStatus({available:false}); } };
-  SP_REACT.useEffect(() => { refresh(); }, []);
+  const text = panelText[steamLanguage()];
+  SP_REACT.useEffect(() => {
+    let live = true, pending = false;
+    const refresh = async () => {
+      if (!live || pending || locked()) return;
+      pending = true;
+      try { const value = await backend.status(); if (live) setStatus(value); }
+      catch (_) { if (live) setStatus({available:false}); }
+      finally { pending = false; }
+    };
+    refresh();
+    return () => { live = false; };
+  }, []);
   const row = (label, value) => SP_REACT.createElement(DFL.PanelSectionRow, {key:label},
     SP_REACT.createElement(DFL.Field, {label, focusable:false}, value));
-  return SP_REACT.createElement(DFL.PanelSection, {title:'Fingerprint / 指纹'},
+  return SP_REACT.createElement(DFL.PanelSection, {title:text.title},
     SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ToggleField, {
-      label:'Fingerprint unlock / 指纹解锁', description:'Experimental, off by default / 实验功能，默认关闭', checked:on,
+      label:text.toggle, description:text.description, checked:on,
       onChange: value => { try { localStorage.setItem(key, value ? '1':'0'); } catch (_) {} setOn(enabled()); if (!value) abort(); else if (locked()) { if (!previous) { previous = true; deviceRetries = 0; } abort(); attempt(); } }
     })),
-    row('Status / 状态', status ? (status.available ? (status.enrolled ? 'Enrolled / 已录入' : 'No prints / 未录入') : 'Unavailable / 不可用') : 'Checking / 检查中'),
-    row('Enroll / 录入', 'Desktop → System Settings → Users → Configure Fingerprints / 桌面 → 系统设置 → 用户 → 配置指纹'),
-    SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {onClick:refresh}, 'Refresh / 刷新')),
-    SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {onClick:() => { const sec=store(); if (sec) sec.SetActiveLockScreenProps({preventCancel:false}); }}, 'Test lock (B to cancel) / 测试锁屏（B 取消）')));
+    row(text.status, status ? (status.available ? (status.enrolled ? text.enrolled : text.empty) : text.unavailable) : text.checking),
+    row(text.enroll, text.guide));
 }
   timer = setInterval(() => { const active = locked(); if (active !== previous) { previous = active; if (active) deviceRetries = 0; if (active && enabled()) { if (successTimer) stopSuccess(); attempt(); } else abort(!active && !!successTimer); } else if (active && enabled() && visualState && visualState !== 'success') { visual.render(visualState); } }, 300);
-  return {name:'Boiler Fingerprint Unlock', titleView:SP_REACT.createElement('div', null, 'Fingerprint / 指纹'), content:SP_REACT.createElement(Content), icon:SP_REACT.createElement('div', null, '◉'), onDismount(){mounted = false; clearInterval(timer); abort();}};
+  return {name:'Boiler Fingerprint Unlock', titleView:SP_REACT.createElement('div', null, panelText[steamLanguage()].title), content:SP_REACT.createElement(Content), icon:SP_REACT.createElement('div', null, '◉'), onDismount(){mounted = false; clearInterval(timer); abort();}};
 };

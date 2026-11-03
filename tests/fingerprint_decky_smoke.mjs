@@ -65,3 +65,20 @@ active=false;tick();assert.equal(timers.size,0);active=true;tick();await flush()
 assert.equal(successes,8);active=false;tick();screen.isConnected=false;await fire(50);screen.isConnected=true;
 // Unload cancels the retry and cannot trigger subsequent attempts.
 active=true;tick();await flush();await finish({result:'unavailable',reason:'device-error'});assert.ok([...timers.values()].some(t=>t.ms===1000));plugin5.onDismount();assert.equal(timers.size,0);
+
+// The SP window's Steam language selects one language only, with English fallback.
+for(const [query,expected] of [['schinese','zh'],['tchinese','zh'],['zh-CN','zh'],['zh-TW','zh'],['zh-Hant','zh'],['en-US','en'],['koreana','en'],['','en']]) assert.equal(module.fingerprintLanguage(query),expected);
+active=false;let panelEffect,statusRequests=0;DFL.findSP=()=>({document:doc,location:{search:'?LANGUAGE=schinese'}});
+window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect=()=>({callable:method=>method==='status'?async()=>{statusRequests++;return {available:true,enrolled:true}}:async()=>({})});
+const chinesePlugin=module.default();SP_REACT.useEffect=fn=>{panelEffect=fn};
+const chinesePanel=JSON.stringify(chinesePlugin.content.type());assert.ok(chinesePanel.includes('指纹解锁'));assert.ok(chinesePanel.includes('桌面 → 系统设置'));assert.ok(!chinesePanel.includes('Fingerprint unlock'));assert.ok(!chinesePanel.includes('Test lock'));assert.ok(!chinesePanel.includes('Refresh'));
+const dispose=panelEffect();await flush();assert.equal(statusRequests,1);dispose();chinesePlugin.onDismount();
+DFL.findSP=()=>({document:doc,location:{search:'?LANGUAGE=english'}});SP_REACT.useEffect=()=>{};const englishPlugin=module.default();const englishPanel=JSON.stringify(englishPlugin.content.type());assert.ok(englishPanel.includes('Fingerprint unlock'));assert.ok(englishPanel.includes('Desktop → System Settings'));assert.ok(!englishPanel.includes('指纹'));assert.ok(!englishPanel.includes('Test lock'));assert.ok(!englishPanel.includes('Refresh'));englishPlugin.onDismount();
+
+// Observed SharedJSContext document language takes precedence over navigator and SP URL.
+globalThis.document={documentElement:{lang:'zh-cn'}};Object.defineProperty(globalThis,'navigator',{value:{language:'en-US'},configurable:true});
+DFL.findSP=()=>({document:doc,location:{search:'?LANGUAGE=english'}});const documentLanguagePlugin=module.default();assert.ok(JSON.stringify(documentLanguagePlugin.content.type()).includes('指纹解锁'));documentLanguagePlugin.onDismount();
+globalThis.document.documentElement.lang='';DFL.findSP=()=>({document:doc,location:{search:''}});Object.defineProperty(globalThis,'navigator',{value:{language:'zh-TW'},configurable:true});const navigatorLanguagePlugin=module.default();assert.ok(JSON.stringify(navigatorLanguagePlugin.content.type()).includes('指纹解锁'));navigatorLanguagePlugin.onDismount();
+
+// Opening the panel while locked does not issue a status query.
+active=true;SP_REACT.useEffect=fn=>{panelEffect=fn};const lockedPanel=module.default();lockedPanel.content.type();const disposeLocked=panelEffect();await flush();assert.equal(statusRequests,1);disposeLocked();lockedPanel.onDismount();active=false;
