@@ -2,6 +2,7 @@
 """Install the standalone plugin into an existing, standard Decky installation."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -209,15 +210,34 @@ def run(action, home, bin_dir):
         print('Standalone plugin ' + ('installed' if action == 'install' else 'uninstalled'))
 
 
+def kde_pam():
+    """Load the Plasma lock-screen installer that ships next to this script."""
+    path = ROOT / 'kde' / 'install-kde-pam.py'
+    spec = importlib.util.spec_from_file_location('kde_pam_install', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', nargs='?', choices=('install', 'check', 'uninstall'), default='install')
+    parser.add_argument('action', nargs='?', choices=('install', 'check', 'uninstall', 'kde-pam'),
+                        default='install')
     parser.add_argument('--decky-home', help='existing Decky homebrew directory')
     parser.add_argument('--fprintd-bin', default='/usr/bin', help='directory containing fprintd CLI programs')
+    parser.add_argument('--kde-pam-package',
+                        help='kde-pam action: fprintd package archive providing usr/lib/security/pam_fprintd.so')
     args = parser.parse_args()
     try:
         if os.geteuid() != 0:
             raise ValueError('Run with sudo')
+        if args.action == 'kde-pam':
+            module = kde_pam()
+            if args.kde_pam_package:
+                print(json.dumps(module.install(args.kde_pam_package), indent=2))
+            else:
+                return module.check()
+            return 0
         run(args.action, decky_home(args.decky_home), args.fprintd_bin)
     except (ValueError, OSError, RuntimeError, KeyError) as exc:
         print('Error: ' + str(exc), file=sys.stderr)

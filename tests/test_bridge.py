@@ -1,8 +1,9 @@
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 import unittest
-from unittest.mock import patch, AsyncMock, Mock
+from unittest.mock import patch, AsyncMock, MagicMock, Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('fingerprint_bridge', ROOT / 'bridge/main.py')
@@ -10,6 +11,32 @@ bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
 class VerificationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generic_fprintd_profile_needs_no_model_or_sensor_name(self):
+        # The service owns device selection; this contract does not attest that
+        # any particular driver or multi-sensor configuration is functional.
+        for bin_dir in ('/usr/bin', '/var/lib/oxp3-installer/fingerprint/bin'):
+            with self.subTest(bin_dir=bin_dir):
+                profile = {'verify_command': bin_dir + '/fprintd-verify',
+                           'list_command': bin_dir + '/fprintd-list',
+                           'enroll_command': bin_dir + '/fprintd-enroll'}
+                config_path = Mock()
+                config_path.read_text.return_value = json.dumps(profile)
+                path_factory = MagicMock()
+                path_factory.return_value.parent.__truediv__.return_value = config_path
+                plugin = bridge.Plugin()
+                with patch.object(bridge, 'Path', path_factory), patch.dict(bridge.os.environ, {'DECKY_USER': 'deck'}):
+                    await plugin._main()
+                async def fake_run(path, timeout):
+                    if path == profile['verify_command']:
+                        return 0, 'Verify result: verify-match (done)\n', None
+                    if path == profile['list_command']:
+                        return 0, '#0: right-index-finger\n', None
+                    raise AssertionError('unexpected fprintd command')
+                plugin._run = fake_run
+                self.assertEqual(await plugin.verify(), {'result': 'match'})
+                self.assertEqual(await plugin.status(), {'available': True, 'enrolled': True,
+                                                          'enroll_command': profile['enroll_command']})
+
     async def test_child_uses_packaged_runpath_without_global_library_override(self):
         plugin = bridge.Plugin()
         plugin.user = 'deck'

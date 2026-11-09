@@ -21,6 +21,7 @@ class Result:
 class InstallTests(unittest.TestCase):
     def test_shell_scripts_use_lf_line_endings(self):
         root = SCRIPT.parents[1]
+        self.assertIn('*.sh text eol=lf', (root / '.gitattributes').read_text().splitlines())
         for path in (root / 'install.sh', root / 'install-online.sh',
                      root / 'tests/test_install_online.sh'):
             with self.subTest(path=path):
@@ -140,6 +141,13 @@ class InstallTests(unittest.TestCase):
             self.run_action('uninstall')
         self.assertEqual((self.target / installer.MARKER).read_bytes(), before)
         self.assertTrue((self.target / 'main.py').exists())
+
+    def test_kde_pam_loader_resolves_the_shipped_tool(self):
+        module = installer.kde_pam()
+        self.assertEqual(Path(module.__file__).resolve(),
+                         (SCRIPT.parents[1] / 'kde' / 'install-kde-pam.py').resolve())
+        for name in ('install', 'check', 'uninstall'):
+            self.assertTrue(callable(getattr(module, name)))
 
 
 if __name__ == '__main__':
