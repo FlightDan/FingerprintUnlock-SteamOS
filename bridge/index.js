@@ -85,10 +85,12 @@ function steamLanguage() {
 const panelText = {
   en: {title:'Fingerprint', toggle:'Fingerprint unlock', description:'Experimental', status:'Status',
     enrolled:'Enrolled', empty:'No prints', unavailable:'Unavailable', checking:'Checking', enroll:'Enroll',
-    guide:'Desktop → System Settings → Users → Configure Fingerprints'},
+    guide:'Desktop → System Settings → Users → Configure Fingerprints',
+    repair:'Reinstall fingerprint support', repairing:'Installing…', repairFailed:'Failed'},
   zh: {title:'指纹', toggle:'指纹解锁', description:'实验功能', status:'状态',
     enrolled:'已录入', empty:'未录入', unavailable:'不可用', checking:'检查中', enroll:'录入',
-    guide:'桌面 → 系统设置 → 用户 → 配置指纹'}
+    guide:'桌面 → 系统设置 → 用户 → 配置指纹',
+    repair:'重新安装指纹支持', repairing:'安装中…', repairFailed:'失败'}
 };
 
 export default () => {
@@ -96,7 +98,7 @@ const internal = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
 let api;
 try { api = internal.connect(2, 'Boiler Fingerprint Unlock'); }
 catch (_) { api = internal.connect(1, 'Boiler Fingerprint Unlock'); }
-const backend = { verify: api.callable('verify'), cancel: api.callable('cancel'), status: api.callable('status') };
+const backend = { verify: api.callable('verify'), cancel: api.callable('cancel'), status: api.callable('status'), repair: api.callable('repair') };
 const key = 'boiler.fingerprint.enabled';
 let settingsFault = false;
 const enabled = () => { if (settingsFault) return false; try { const value = localStorage.getItem(key); return value === null || value === '1'; } catch { settingsFault = true; return false; } };
@@ -203,6 +205,8 @@ async function attempt() {
 function Content() {
   const [on, setOn] = SP_REACT.useState(enabled());
   const [status, setStatus] = SP_REACT.useState(null);
+  const [fixing, setFixing] = SP_REACT.useState(false);
+  const [fixFailed, setFixFailed] = SP_REACT.useState(false);
   const text = panelText[steamLanguage()];
   SP_REACT.useEffect(() => {
     let live = true, pending = false;
@@ -224,7 +228,14 @@ function Content() {
       onChange: value => { try { localStorage.setItem(key, value ? '1':'0'); } catch (_) { settingsFault = true; } setOn(enabled()); if (!value || !enabled()) abort(); else if (locked()) { if (!previous) { previous = true; deviceRetries = 0; } abort(); attempt(); } }
     })),
     row(text.status, status ? (status.available ? (status.enrolled ? text.enrolled : text.empty) : text.unavailable) : text.checking),
-    row(text.enroll, text.guide));
+    row(text.enroll, text.guide),
+    status && !status.available && SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {
+      layout:'below', disabled:fixing, onClick: async () => {
+        setFixing(true); setFixFailed(false);
+        try { const r = await backend.repair(); setFixFailed(!r?.ok); setStatus(await backend.status()); }
+        catch (_) { setFixFailed(true); }
+        finally { setFixing(false); }
+      }}, fixing ? text.repairing : fixFailed ? text.repair + ' — ' + text.repairFailed : text.repair)));
 }
   timer = setInterval(() => { const active = locked(); if (active !== previous) { previous = active; if (active) deviceRetries = 0; if (active && enabled()) { if (successTimer) stopSuccess(); attempt(); } else abort(!active && !!successTimer); } else if (active && enabled() && visualState && visualState !== 'success') { visual.render(visualState); } }, 300);
   return {name:'Boiler Fingerprint Unlock', titleView:SP_REACT.createElement('div', null, panelText[steamLanguage()].title), content:SP_REACT.createElement(Content), icon:SP_REACT.createElement('div', null, '◉'), onDismount(){mounted = false; clearInterval(timer); abort();}};
