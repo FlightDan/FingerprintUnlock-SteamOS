@@ -12,6 +12,17 @@ spec = importlib.util.spec_from_file_location('fingerprint_bridge', ROOT / 'brid
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
+def root_owned_fixture_stat(path):
+    # Preserve real symlink, file-type and mode checks on a non-root test runner.
+    info = stat_for_test(path)
+    fields = list(info)
+    fields[4] = 0
+    return os.stat_result(fields)
+
+
+stat_for_test = Path.lstat
+
+
 class VerificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_generic_fprintd_profile_needs_no_model_or_sensor_name(self):
         # The service owns device selection; this contract does not attest that
@@ -63,6 +74,7 @@ class VerificationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plugin = bridge.Plugin(); plugin.package_lock = asyncio.Lock(); plugin.repairing = False
             plugin.verify_path = '/usr/bin/fprintd-verify'; plugin.cache_root = Path(tmp)
+            plugin._prepare_keyring = AsyncMock(return_value=True)
             plugin._saved = Mock(return_value=['/trusted/fprintd', '/trusted/libfprint', '/trusted/libgusb'])
             plugin._strict_config = AsyncMock(return_value='[options]\nLocalFileSigLevel = Required TrustedOnly\n')
             plugin._check_install = AsyncMock(return_value=None)
@@ -99,6 +111,71 @@ class VerificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('LocalFileSigLevel = Required TrustedOnly', config)
         self.assertNotIn('Optional', config)
         self.assertNotIn('[core]', config)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX ownership and mode semantics required')
+    async def test_keyring_snapshot_cold_warm_and_changed_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); sources = root / 'sources'; sources.mkdir()
+            for name in bridge.KEYRING_NAMES:
+                (sources / name).write_bytes(name.encode())
+            plugin = bridge.Plugin(); plugin.cache_root = root
+            calls = []
+            async def cmd(timeout, *args):
+                calls.append((timeout, args))
+                if '--populate' in args:
+                    build = Path(args[args.index('--gpgdir') + 1])
+                    for name in bridge.KEYRING_FILES: (build / name).write_bytes(name.encode())
+                    (build / 'private-key').write_bytes(b'not exported')
+                return 0, ''
+            plugin._cmd = cmd
+            with (patch.object(bridge, 'KEYRING_SOURCES', sources),
+                  patch.object(Path, 'lstat', root_owned_fixture_stat)):
+                for index in range(2):
+                    gpg = root / f'operation-{index}'; gpg.mkdir(mode=0o700)
+                    self.assertTrue(await plugin._prepare_keyring(gpg))
+                    self.assertEqual({p.name for p in gpg.iterdir()}, set(bridge.KEYRING_FILES))
+                    for name in bridge.KEYRING_FILES:
+                        self.assertEqual((gpg / name).read_bytes(), name.encode())
+                    (gpg / 'pubring.gpg').write_bytes(b'operation-local changes')
+                self.assertEqual([c[0] for c in calls], [120, 600])
+                baseline = next(root.glob('keyring-*'))
+                self.assertEqual({p.name for p in baseline.iterdir()}, set(bridge.KEYRING_FILES))
+                (sources / bridge.KEYRING_NAMES[-1]).write_bytes(b'changed')
+                gpg = root / 'changed'; gpg.mkdir(mode=0o700)
+                self.assertTrue(await plugin._prepare_keyring(gpg))
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(len(list(root.glob('keyring-*'))), 2)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX ownership and mode semantics required')
+    async def test_keyring_failure_and_untrusted_paths_do_not_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); sources = root / 'sources'; sources.mkdir()
+            for name in bridge.KEYRING_NAMES:
+                (sources / name).write_bytes(b'source')
+            plugin = bridge.Plugin(); plugin.cache_root = root
+            plugin._cmd = AsyncMock(side_effect=[(0, ''), (1, 'failed')])
+            gpg = root / 'operation'; gpg.mkdir(mode=0o700)
+            with (patch.object(bridge, 'KEYRING_SOURCES', sources),
+                  patch.object(Path, 'lstat', root_owned_fixture_stat)):
+                self.assertFalse(await plugin._prepare_keyring(gpg))
+                self.assertEqual(list(root.glob('keyring-*')), [])
+                generation = plugin._keyring_generation()
+                (root / ('keyring-' + generation)).symlink_to(sources, target_is_directory=True)
+                plugin._cmd.reset_mock()
+                self.assertFalse(await plugin._prepare_keyring(gpg))
+                plugin._cmd.assert_not_awaited()
+                (sources / bridge.KEYRING_NAMES[0]).unlink()
+                (sources / bridge.KEYRING_NAMES[0]).symlink_to(sources / bridge.KEYRING_NAMES[1])
+                self.assertFalse(await plugin._prepare_keyring(gpg))
+
+    async def test_status_reports_background_package_lock_when_repair_needed(self):
+        plugin = bridge.Plugin(); plugin.lock = asyncio.Lock(); plugin.package_lock = asyncio.Lock()
+        plugin.verify_path = '/usr/bin/fprintd-verify'; plugin.list_path = '/usr/bin/fprintd-list'
+        plugin.enroll_command = 'enroll'; plugin.repairing = False
+        plugin._run = AsyncMock(return_value=(1, '', None))
+        async with plugin.package_lock:
+            with patch.object(bridge.os, 'access', return_value=False):
+                self.assertTrue((await plugin.status())['busy'])
 
     async def test_offline_repair_refuses_an_installed_dependency_downgrade(self):
         plugin = bridge.Plugin()

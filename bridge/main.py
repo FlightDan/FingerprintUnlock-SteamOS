@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,10 @@ PACKAGES = ('fprintd', 'libfprint', 'libgusb')
 PACMAN_CACHE = Path('/var/cache/pacman/pkg')
 CACHE_ROOT = Path('/home/.boiler-fingerprint')
 TEMP_ROOT = Path('/tmp')
+KEYRING_SOURCES = Path('/usr/share/pacman/keyrings')
+KEYRING_NAMES = tuple(f'{name}{suffix}' for name in ('archlinux', 'holo')
+                      for suffix in ('.gpg', '-trusted', '-revoked'))
+KEYRING_FILES = ('pubring.gpg', 'trustdb.gpg')
 
 
 class Plugin:
@@ -115,7 +120,10 @@ class Plugin:
             self.cancelled = False
             code, text, _ = await self._run(self.list_path, 10)
             return {'available': code == 0, 'enrolled': bool(re.search(r'#\d+:\s*\S+', text)) if code == 0 else False,
-                    'enroll_command': self.enroll_command, 'busy': self.repairing,
+                    'enroll_command': self.enroll_command,
+                    'busy': self.repairing or (self.verify_path == '/usr/bin/fprintd-verify'
+                                               and not os.access(self.verify_path, os.X_OK)
+                                               and self.package_lock.locked()),
                     'repairable': self.verify_path == '/usr/bin/fprintd-verify' and not os.access(self.verify_path, os.X_OK)}
 
     async def _stop_command(self, proc, completion):
@@ -383,14 +391,72 @@ class Plugin:
             result.pop('retryable', None)
             return result
 
-    async def _prepare_keyring(self, gpg):
-        for args in (('pacman-key', '--gpgdir', str(gpg), '--init'),
-                     ('pacman-key', '--gpgdir', str(gpg), '--populate', 'archlinux', 'holo')):
-            code, out = await self._cmd(120, *args)
-            if code != 0:
-                logging.error('cannot prepare fingerprint keyring: %s', out[-300:])
+    def _keyring_generation(self):
+        digest = hashlib.sha256()
+        for name in KEYRING_NAMES:
+            path = KEYRING_SOURCES / name
+            st = path.lstat()
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+                raise ValueError('untrusted bundled keyring source')
+            data = path.read_bytes()
+            digest.update(len(name).to_bytes(4, 'big'))
+            digest.update(name.encode('ascii'))
+            digest.update(len(data).to_bytes(8, 'big'))
+            digest.update(data)
+        return digest.hexdigest()
+
+    def _keyring_valid(self, directory):
+        try:
+            st = directory.lstat()
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o700:
                 return False
-        return True
+            if {p.name for p in directory.iterdir()} != set(KEYRING_FILES):
+                return False
+            for name in KEYRING_FILES:
+                st = (directory / name).lstat()
+                if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0
+                        or stat.S_IMODE(st.st_mode) != 0o600 or st.st_size == 0):
+                    return False
+            return True
+        except OSError:
+            return False
+
+    async def _prepare_keyring(self, gpg):
+        # Callers hold package_lock and have checked the private cache ancestry.
+        try:
+            generation = self._keyring_generation()
+            baseline = self.cache_root / ('keyring-' + generation)
+            if not self._keyring_valid(baseline):
+                if baseline.exists() or baseline.is_symlink():
+                    return False
+                with tempfile.TemporaryDirectory(dir=self.cache_root, prefix='key-build-') as tmp:
+                    build = Path(tmp) / 'gnupg'; build.mkdir(mode=0o700)
+                    for timeout, args in ((120, ('pacman-key', '--gpgdir', str(build), '--init')),
+                                          (600, ('pacman-key', '--gpgdir', str(build), '--populate', 'archlinux', 'holo'))):
+                        code, out = await self._cmd(timeout, *args)
+                        if code != 0:
+                            logging.error('cannot prepare fingerprint keyring: %s', out[-300:])
+                            return False
+                    if self._keyring_generation() != generation:
+                        return False
+                    stage = Path(tmp) / 'baseline'; stage.mkdir(mode=0o700)
+                    for name in KEYRING_FILES:
+                        source = build / name
+                        st = source.lstat()
+                        if not stat.S_ISREG(st.st_mode) or st.st_size == 0:
+                            return False
+                        shutil.copyfile(source, stage / name)
+                        (stage / name).chmod(0o600)
+                    if not self._keyring_valid(stage):
+                        return False
+                    stage.rename(baseline)
+            for name in KEYRING_FILES:
+                shutil.copyfile(baseline / name, gpg / name)
+                (gpg / name).chmod(0o600)
+            return True
+        except (OSError, ValueError):
+            logging.exception('cannot prepare fingerprint keyring')
+            return False
 
     async def _install_locked(self, saved):
         with tempfile.TemporaryDirectory(dir=self.cache_root, prefix='install-') as tmp:
