@@ -43,6 +43,10 @@ This installs one file, `/usr/lib/security/pam_fprintd.so`, and never rewrites a
 
 There is no setting to enable this in System Settings. Plasma shows the fingerprint prompt exactly when the non-interactive authenticator reports itself available; the password field is always present. On an ONEXPLAYER X2 Mini with an FTE3600 sensor the prompt appeared and the enrolled finger unlocked a locked session.
 
+## Contributors
+
+- [KevinX8](https://github.com/KevinX8) contributed verification across all enrolled fingers, the SteamOS fingerprint package recovery workflow, and Decky ZIP packaging. KevinX8 tested fingerprint matching and offline recovery on the Lenovo Legion Go 2 (ELAN 04f3:0c8c).
+
 ## License
 
 Boiler code: [AGPL-3.0](COPYING). The bundled upstream project retains its [MIT license](upstream/LICENSE).

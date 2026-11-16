@@ -83,6 +83,51 @@ globalThis.document.documentElement.lang='';DFL.findSP=()=>({document:doc,locati
 // Opening the panel while locked does not issue a status query.
 active=true;SP_REACT.useEffect=fn=>{panelEffect=fn};const lockedPanel=module.default();lockedPanel.content.type();const disposeLocked=panelEffect();await flush();assert.equal(statusRequests,1);disposeLocked();lockedPanel.onDismount();active=false;
 
+// Background repair refreshes an already-open panel and hides the manual action when ready.
+const previousUseState = SP_REACT.useState;
+const panelState = [];
+let stateIndex = 0;
+SP_REACT.useState = initial => {
+  const index = stateIndex++;
+  if (!(index in panelState)) panelState[index] = initial;
+  return [panelState[index], value => { panelState[index] = value; }];
+};
+let repairStatus = {available:false, busy:true, repairable:true};
+let repairRequests = 0;
+DFL.ButtonItem = 'ButtonItem';
+window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect = () => ({
+  callable: method => method === 'status' ? async () => repairStatus : async () => {
+    repairRequests++; return {ok:false,error:'failed to restore readonly state'};
+  }
+});
+const repairPlugin = module.default();
+const renderRepairTree = () => { stateIndex = 0; return repairPlugin.content.type(); };
+const renderRepairPanel = () => JSON.stringify(renderRepairTree());
+renderRepairPanel();
+const disposeRepair = panelEffect();
+await flush();
+assert.ok(renderRepairPanel().includes('检查中'));
+assert.ok(!renderRepairPanel().includes('重新安装指纹支持'));
+repairStatus = {available:false, repairable:true};
+await fire(2000);
+assert.ok(renderRepairPanel().includes('重新安装指纹支持'));
+const repairButton = renderRepairTree().children.at(-1).children[0];
+active = true;
+await repairButton.props.onClick();
+assert.equal(repairRequests, 0);
+active = false;
+await repairButton.props.onClick();
+assert.equal(repairRequests, 1);
+repairStatus = {available:true, enrolled:true};
+await fire(2000);
+assert.ok(renderRepairPanel().includes('已录入'));
+assert.ok(!renderRepairPanel().includes('ButtonItem'));
+assert.ok(renderRepairPanel().includes('失败'));
+assert.ok(![...timers.values()].some(timer => timer.ms === 2000));
+disposeRepair();
+repairPlugin.onDismount();
+SP_REACT.useState = previousUseState;
+
 // First use defaults on; explicit disable survives remount and invalid settings fail closed.
 let toggleProps;const savedCreate=SP_REACT.createElement;SP_REACT.createElement=(type,props,...children)=>{if(type==='Toggle')toggleProps=props;return savedCreate(type,props,...children)};
 let firstVerify=0;window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect=()=>({callable:method=>method==='verify'?async()=>{firstVerify++;return {result:'unavailable',reason:'error'}}:async()=>({})});
