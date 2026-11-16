@@ -209,17 +209,24 @@ function Content() {
   const [fixFailed, setFixFailed] = SP_REACT.useState(false);
   const text = panelText[steamLanguage()];
   SP_REACT.useEffect(() => {
-    let live = true, pending = false;
-    const refresh = async () => {
-      if (!live || pending || locked()) return;
-      pending = true;
-      try { const value = await backend.status(); if (live) setStatus(value); }
-      catch (_) { if (live) setStatus({available:false}); }
-      finally { pending = false; }
-    };
+    if (fixing) return;
+    let live = true, statusTimer;
+    const retry = () => { if (live) statusTimer = setTimeout(refresh, 2000); };
+    async function refresh() {
+      if (!live || !mounted) return;
+      if (locked()) { retry(); return; }
+      try {
+        const value = await backend.status();
+        if (!live || !mounted) return;
+        setStatus(value);
+        if (value?.busy || value?.repairable) retry();
+      } catch (_) {
+        if (live && mounted) setStatus({available:false});
+      }
+    }
     refresh();
-    return () => { live = false; };
-  }, []);
+    return () => { live = false; clearTimeout(statusTimer); };
+  }, [fixing]);
   const row = (label, value) => SP_REACT.createElement(DFL.PanelSectionRow, {key:label},
     SP_REACT.createElement(DFL.Field, {label, focusable:false}, value));
   return SP_REACT.createElement(DFL.PanelSection, {title:text.title},
@@ -227,15 +234,17 @@ function Content() {
       label:text.toggle, description:text.description, checked:on,
       onChange: value => { try { localStorage.setItem(key, value ? '1':'0'); } catch (_) { settingsFault = true; } setOn(enabled()); if (!value || !enabled()) abort(); else if (locked()) { if (!previous) { previous = true; deviceRetries = 0; } abort(); attempt(); } }
     })),
-    row(text.status, status ? (status.available ? (status.enrolled ? text.enrolled : text.empty) : text.unavailable) : text.checking),
+    row(text.status, !status || status.busy ? text.checking : status.available ? (status.enrolled ? text.enrolled : text.empty) : text.unavailable),
     row(text.enroll, text.guide),
-    status && !status.available && SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {
+    fixFailed && row(text.repair, text.repairFailed),
+    (fixing || (status?.repairable && !status.busy)) && SP_REACT.createElement(DFL.PanelSectionRow, null, SP_REACT.createElement(DFL.ButtonItem, {
       layout:'below', disabled:fixing, onClick: async () => {
+        if (fixing || locked()) return;
         setFixing(true); setFixFailed(false);
-        try { const r = await backend.repair(); setFixFailed(!r?.ok); setStatus(await backend.status()); }
+        try { setFixFailed(!(await backend.repair())?.ok); }
         catch (_) { setFixFailed(true); }
         finally { setFixing(false); }
-      }}, fixing ? text.repairing : fixFailed ? text.repair + ' — ' + text.repairFailed : text.repair)));
+      }}, fixing ? text.repairing : text.repair)));
 }
   timer = setInterval(() => { const active = locked(); if (active !== previous) { previous = active; if (active) deviceRetries = 0; if (active && enabled()) { if (successTimer) stopSuccess(); attempt(); } else abort(!active && !!successTimer); } else if (active && enabled() && visualState && visualState !== 'success') { visual.render(visualState); } }, 300);
   return {name:'Boiler Fingerprint Unlock', titleView:SP_REACT.createElement('div', null, panelText[steamLanguage()].title), content:SP_REACT.createElement(Content), icon:SP_REACT.createElement('div', null, '◉'), onDismount(){mounted = false; clearInterval(timer); abort();}};

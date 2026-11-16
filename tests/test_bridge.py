@@ -26,8 +26,11 @@ class VerificationTests(unittest.IsolatedAsyncioTestCase):
                 path_factory = MagicMock()
                 path_factory.return_value.parent.__truediv__.return_value = config_path
                 plugin = bridge.Plugin()
-                with patch.object(bridge, 'Path', path_factory), patch.dict(bridge.os.environ, {'DECKY_USER': 'deck'}):
+                with (patch.object(bridge, 'Path', path_factory),
+                      patch.dict(bridge.os.environ, {'DECKY_USER': 'deck'}),
+                      patch.object(plugin, '_keep_fresh', return_value=None)):
                     await plugin._main()
+                self.addAsyncCleanup(plugin._unload)
                 async def fake_run(path, timeout, *flags):
                     if path == profile['verify_command']:
                         return 0, 'Verify result: verify-match (done)\n', None
@@ -36,8 +39,9 @@ class VerificationTests(unittest.IsolatedAsyncioTestCase):
                     raise AssertionError('unexpected fprintd command')
                 plugin._run = fake_run
                 self.assertEqual(await plugin.verify(), {'result': 'match'})
-                self.assertEqual(await plugin.status(), {'available': True, 'enrolled': True,
-                                                          'enroll_command': profile['enroll_command']})
+                with patch.object(bridge.os, 'access', return_value=True):
+                    self.assertEqual(await plugin.status(), {'available': True, 'enrolled': True,
+                                                              'enroll_command': profile['enroll_command'], 'busy': False, 'repairable': False})
 
     async def test_child_uses_packaged_runpath_without_global_library_override(self):
         plugin = bridge.Plugin()
@@ -55,41 +59,92 @@ class VerificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spawn.call_args.kwargs['env'], {'PATH': '/usr/bin:/bin', 'LANG': 'C'})
 
 
-    async def test_repair_prefers_saved_packages_then_downloads_and_restores_readonly(self):
+    async def test_repair_checks_readonly_and_restores_it(self):
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, 'fprintd-1-1-x86_64.pkg.tar.zst').touch()
-            Path(tmp, 'fprintd-1-1-x86_64.pkg.tar.zst.sig').touch()
-            # (saved copy present, offline install code, download ok, final install code) -> (ok, pacman -U calls, downloads)
-            for saved, offline, fetched, final, ok, installs, downloads in [
-                    (True, 0, False, 0, True, 1, 0), (True, 1, True, 0, True, 2, 1),
-                    (False, 0, True, 0, True, 1, 1), (True, 1, False, 0, False, 1, 1), (True, 1, True, 1, False, 2, 1)]:
-                plugin = bridge.Plugin(); plugin.lock = asyncio.Lock(); plugin.verify_path = '/usr/bin/true'
-                plugin.packages = Path(tmp) if saved else Path(tmp, 'none')
-                calls = []; results = iter([offline, final] if saved else [final])
-                async def fake_cmd(timeout, *args):
-                    calls.append(args)
-                    if args[:2] == ('steamos-readonly', 'status'):
-                        return 0, 'enabled\n'
-                    return (next(results), 'boom') if args[:2] == ('pacman', '-U') else (0, '')
-                async def fake_download(): downloads_made.append(1); return fetched
-                downloads_made = []
-                plugin._cmd, plugin._download_latest = fake_cmd, fake_download
-                self.assertEqual((await plugin.repair())['ok'], ok)
-                self.assertEqual(len([c for c in calls if c[:2] == ('pacman', '-U')]), installs)
-                self.assertEqual(len(downloads_made), downloads)
-                self.assertEqual(calls[1], ('steamos-readonly', 'disable'))
-                self.assertEqual(calls[-1], ('steamos-readonly', 'enable'))
-                if saved:
-                    pkg = next(c for c in calls if c[:2] == ('pacman', '-U'))
-                    self.assertEqual([a for a in pkg if 'pkg.tar' in a], [str(Path(tmp, 'fprintd-1-1-x86_64.pkg.tar.zst'))])
+            plugin = bridge.Plugin(); plugin.package_lock = asyncio.Lock(); plugin.repairing = False
+            plugin.verify_path = '/usr/bin/fprintd-verify'; plugin.cache_root = Path(tmp)
+            plugin._saved = Mock(return_value=['/trusted/fprintd', '/trusted/libfprint', '/trusted/libgusb'])
+            plugin._strict_config = AsyncMock(return_value='[options]\nLocalFileSigLevel = Required TrustedOnly\n')
+            plugin._check_install = AsyncMock(return_value=None)
+            calls = []
+            async def cmd(timeout, *args):
+                calls.append(args)
+                if args[:2] == ('steamos-readonly', 'status'): return 0, 'enabled'
+                return 0, ''
+            plugin._cmd = cmd
+            with patch.object(bridge.os, 'access', side_effect=[False, True]):
+                self.assertEqual(await plugin.repair(), {'ok': True})
+            install = next(c for c in calls if '-U' in c)
+            self.assertNotIn('--needed', install)
+            self.assertEqual(install[-3:], ('/trusted/fprintd', '/trusted/libfprint', '/trusted/libgusb'))
+            self.assertEqual(calls[-2:], [('steamos-readonly', 'enable'), ('steamos-readonly', 'status')])
+            async def bad_status(timeout, *args): return 0, 'unknown'
+            plugin._cmd = bad_status
+            self.assertIn('readonly state', (await plugin.repair())['error'])
+            calls.clear()
+            async def failed_restore(timeout, *args):
+                calls.append(args)
+                if args[:2] == ('steamos-readonly', 'status'): return 0, 'enabled'
+                if args[:2] == ('steamos-readonly', 'enable'): return 1, 'failed'
+                return 0, ''
+            plugin._cmd = failed_restore
+            with patch.object(bridge.os, 'access', side_effect=[False, True]):
+                self.assertIn('restore readonly', (await plugin.repair())['error'])
+
+    async def test_resolved_config_excludes_repositories_and_forces_local_signatures(self):
+        plugin = bridge.Plugin()
+        plugin._cmd = AsyncMock(return_value=(0, '[options]\nArchitecture = auto\nLocalFileSigLevel = Optional\n[core]\nServer = https://example.invalid\n'))
+        config = await plugin._strict_config()
+        self.assertIn('Architecture = auto', config)
+        self.assertIn('LocalFileSigLevel = Required TrustedOnly', config)
+        self.assertNotIn('Optional', config)
+        self.assertNotIn('[core]', config)
+
+    async def test_offline_repair_refuses_an_installed_dependency_downgrade(self):
+        plugin = bridge.Plugin()
+        plugin.cache_root = Path(tempfile.gettempdir())
+        plugin._strict_config = AsyncMock(return_value='[options]\nLocalFileSigLevel = Required TrustedOnly\n')
+        calls = []
+        async def cmd(timeout, *args):
+            calls.append(args)
+            if args[:2] == ('steamos-readonly', 'status'):
+                return 0, 'enabled'
+            if '--print' in args:
+                return 0, 'fprintd\t1-1\nlibfprint\t1-1\nlibgusb\t1-1\n'
+            if args[:2] == ('pacman', '-Q'):
+                return 1, 'libfprint 2-1\n'
+            if args == ('vercmp', '1-1', '2-1'):
+                return 0, '-1\n'
+            raise AssertionError(args)
+        plugin._cmd = cmd
+        result = await plugin._install_transaction(['fprintd', 'libfprint', 'libgusb'], '/keys')
+        self.assertFalse(result['ok'])
+        self.assertIn('older than installed package: libfprint', result['error'])
+        self.assertNotIn(('steamos-readonly', 'disable'), calls)
+
+    async def test_retry_download_occurs_after_failed_install(self):
+        plugin = bridge.Plugin(); plugin.package_lock = asyncio.Lock()
+        plugin._saved = Mock(return_value=['saved'])
+        order = []
+        async def install(saved):
+            order.append('install')
+            return {'ok': False, 'error': 'failed', 'retryable': True} if len(order) == 1 else {'ok': True}
+        async def download(): order.append('download'); return True
+        plugin._install_locked = install; plugin._download_locked = download
+        self.assertEqual(await plugin._repair(False), {'ok': True})
+        self.assertEqual(order, ['install', 'download', 'install'])
+
+    async def test_alternate_profile_never_repairs(self):
+        plugin = bridge.Plugin(); plugin.verify_path = '/custom/verify'
+        self.assertEqual((await plugin.repair())['error'], 'unsupported profile')
 
     async def test_keep_fresh_repairs_missing_fprintd_from_saved_copy_without_network(self):
-        plugin = bridge.Plugin(); plugin.verify_path = '/nonexistent/fprintd-verify'
+        plugin = bridge.Plugin(); plugin.verify_path = '/usr/bin/fprintd-verify'
         repairs, downloads = [], []
         async def fake_repair(offline_only=False): repairs.append(offline_only); return {'ok': True}
         async def fake_download(): downloads.append(1); return len(downloads) > 1
         async def fake_seed(): pass
-        async def stop(delay): 
+        async def stop(delay):
             if len(downloads) > 1: raise asyncio.CancelledError
         plugin.repair, plugin._download_latest, plugin._seed_cache = fake_repair, fake_download, fake_seed
         with patch.object(bridge.asyncio, 'sleep', stop), self.assertRaises(asyncio.CancelledError):
@@ -97,43 +152,78 @@ class VerificationTests(unittest.IsolatedAsyncioTestCase):
         # once at startup, once when the first successful download arrives; never online
         self.assertEqual(repairs, [True, True])
 
-    async def test_download_latest_uses_private_database_and_prunes_old_versions(self):
+    async def test_download_publishes_only_complete_authenticated_set(self):
         with tempfile.TemporaryDirectory() as tmp:
-            packages = Path(tmp, 'packages'); packages.mkdir()
-            for name in ('fprintd-1-1-x86_64.pkg.tar.zst', 'fprintd-2-1-x86_64.pkg.tar.zst', 'libfprint-9-1-x86_64.pkg.tar.zst'):
-                Path(packages, name).touch()
-            plugin = bridge.Plugin(); plugin.packages = packages
+            plugin = bridge.Plugin(); plugin.cache_root = Path(tmp); plugin.packages = Path(tmp, 'current')
+            plugin.package_lock = asyncio.Lock(); plugin._cache_ready = Mock(return_value=True)
+            plugin._saved = Mock(return_value=['complete'])
+            plugin._authenticate = AsyncMock(return_value=True)
+            plugin._prepare_keyring = AsyncMock(return_value=True)
+            real_lstat = Path.lstat
+            def lstat(path, *args, **kwargs):
+                if path == Path(tmp): return Mock(st_mode=0o41777, st_uid=0)
+                return real_lstat(path, *args, **kwargs)
             calls = []
-            async def fake_cmd(timeout, *args):
+            names = ['fprintd', 'libfprint', 'libgusb']
+            async def cmd(timeout, *args):
                 calls.append(args)
-                if args[0] == 'pacman-conf': return 0, '/system/db/\n'
-                if '-Si' in args: return 0, 'Name : fprintd\nVersion : 2-1\nName : libfprint\nVersion : 9-1\n'
+                if '-Sp' in args:
+                    return 0, ''.join(f'{n}\t{n}-1-1-x86_64.pkg.tar.zst\t1-1\tc2ln\n' for n in names)
+                if '-Sw' in args:
+                    stage = Path(args[args.index('--cachedir') + 1])
+                    for n in names: (stage / f'{n}-1-1-x86_64.pkg.tar.zst').write_bytes(b'package')
+                    (stage / 'dependency-1-1-x86_64.pkg.tar.zst').write_bytes(b'extra')
                 return 0, ''
-            plugin._cmd = fake_cmd
-            self.assertTrue(await plugin._download_latest())
-            self.assertEqual(sorted(p.name for p in packages.iterdir()),
-                             ['fprintd-2-1-x86_64.pkg.tar.zst', 'libfprint-9-1-x86_64.pkg.tar.zst'])
-            self.assertEqual(os.readlink(Path(tmp, 'db', 'local')), '/system/db/local')
-            self.assertTrue(all(c[1:3] == ('--dbpath', str(Path(tmp, 'db'))) for c in calls if c[0] == 'pacman'))
-            self.assertTrue(all('steamos-readonly' not in c for c in calls))
-            async def offline(timeout, *args): return (1, '') if '-Sy' in args else (0, '/system/db\n')
-            plugin._cmd = offline
-            Path(packages, 'fprintd-1-1-x86_64.pkg.tar.zst').touch()
-            self.assertFalse(await plugin._download_latest())
-            self.assertTrue(Path(packages, 'fprintd-1-1-x86_64.pkg.tar.zst').exists())
+            plugin._cmd = cmd
+            published = []
+            plugin._publish = Mock(side_effect=lambda stage: published.append(sorted(p.name for p in stage.iterdir())))
+            with patch.object(bridge, 'TEMP_ROOT', Path(tmp)), patch.object(Path, 'lstat', lstat):
+                self.assertTrue(await plugin._download_latest())
+            self.assertEqual(len(published[0]), 6)
+            download = next(c for c in calls if '-Sw' in c)
+            self.assertEqual(download[-3:], tuple(names))
+            plugin._authenticate.return_value = False
+            with patch.object(bridge, 'TEMP_ROOT', Path(tmp)), patch.object(Path, 'lstat', lstat):
+                self.assertFalse(await plugin._download_latest())
+            self.assertEqual(len(published), 1)
 
-    async def test_seed_cache_copies_installed_versions_only_when_empty(self):
-        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
-            for name in ('fprintd-2-1-x86_64.pkg.tar.zst', 'fprintd-2-1-x86_64.pkg.tar.zst.sig', 'libgusb-2-1-x86_64.pkg.tar.zst'):
-                Path(src, name).touch()
-            Path(dst, 'libgusb-1-1-x86_64.pkg.tar.zst').touch()
-            plugin = bridge.Plugin(); plugin.packages = Path(dst)
-            async def fake_cmd(timeout, *args): return 0, 'fprintd 2-1\nlibfprint 2-1\nlibgusb 2-1\n'
-            plugin._cmd = fake_cmd
-            with patch.object(bridge, 'PACMAN_CACHE', Path(src)):
-                await plugin._seed_cache()
-            self.assertEqual(sorted(p.name for p in Path(dst).iterdir()),
-                             ['fprintd-2-1-x86_64.pkg.tar.zst', 'fprintd-2-1-x86_64.pkg.tar.zst.sig', 'libgusb-1-1-x86_64.pkg.tar.zst'])
+    async def test_command_timeout_terminates_and_drains_process_group(self):
+        plugin = bridge.Plugin()
+        finished = asyncio.Event()
+        proc = AsyncMock(pid=123)
+        async def communicate():
+            await finished.wait()
+            return b'', None
+        proc.communicate.side_effect = communicate
+        with (patch.object(bridge.asyncio, 'create_subprocess_exec', return_value=proc) as spawn,
+              patch.object(bridge.signal, 'SIGKILL', 9, create=True),
+              patch.object(bridge.os, 'killpg', side_effect=lambda *args: finished.set(), create=True) as kill):
+            result = await plugin._cmd(0.001, 'fixture')
+        self.assertEqual(result, (None, 'timeout'))
+        self.assertTrue(spawn.call_args.kwargs['start_new_session'])
+        kill.assert_called_once_with(proc.pid, bridge.signal.SIGTERM)
+        proc.communicate.assert_awaited_once()
+
+    async def test_unload_without_repair_waits_for_background_cleanup(self):
+        plugin = bridge.Plugin()
+        started, cleaned = asyncio.Event(), asyncio.Event()
+        async def background():
+            try:
+                started.set()
+                await asyncio.sleep(60)
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+        profile = {'verify_command': '/usr/bin/fprintd-verify',
+                   'list_command': '/usr/bin/fprintd-list',
+                   'enroll_command': '/usr/bin/fprintd-enroll'}
+        with (patch.object(Path, 'read_text', return_value=json.dumps(profile)),
+              patch.object(plugin, '_keep_fresh', side_effect=background)):
+            await plugin._main()
+        await started.wait()
+        await plugin._unload()
+        self.assertTrue(cleaned.is_set())
+        self.assertTrue(plugin.fresh_task.cancelled())
 
     async def test_failure_cancel_and_partial_match_cannot_unlock(self):
         plugin = bridge.Plugin()
