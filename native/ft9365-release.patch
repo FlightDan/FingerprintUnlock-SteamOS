@@ -1,0 +1,558 @@
+diff --git a/libfprint/drivers/fte3600/device_session.c b/libfprint/drivers/fte3600/device_session.c
+index 2b0b575..b3c2d25 100644
+--- a/libfprint/drivers/fte3600/device_session.c
++++ b/libfprint/drivers/fte3600/device_session.c
+@@ -27,6 +27,7 @@ struct fte3600_device_session
+   size_t                                    image_bytes, raw_bytes, workspace_bytes;
+   int                                       active, io_failed;
+   int                                       fw_maintenance_pending, fw_down_armed;
++  int                                       ft9365_up_pending;
+   unsigned                                  fw_release_rejections;
+ };
+ static int
+@@ -393,6 +394,7 @@ fte3600_device_start (struct fte3600_device_session *s)
+   s->status.baseline_crc = 0;
+   s->status.calibrated_image_dac = 0;
+   s->fw_maintenance_pending = s->fw_down_armed = 0;
++  s->ft9365_up_pending = 0;
+   s->fw_release_rejections = 0;
+   /* Recovery starts a real cold initialization; stale flags cannot qualify. */
+   (void) fte3600_factory_integration_state_defaults (&s->factory);
+@@ -609,6 +611,34 @@ complete:
+     }
+   return error;
+ }
++static enum fte3600_device_error
++ft9365_stop_up_io (struct fte3600_device_session *s)
++{
++  struct fte3600_ft93xx_device *m = &s->factory.word.modern;
++  struct fte3600_ft93xx_fdt_diagnostics d;
++  s->status.component_error = fte3600_ft93xx_fdt_run (
++    m->preparation.identity.chip_id, m->preparation.foundry, m->preparation.features,
++    &m->preparation.state, &m->fdt, FTE3600_FT93XX_FDT_STOP, 0, NULL, 0, &s->modern_io, &d);
++  return s->status.component_error || modern_transport_bad (&d.transport) ?
++    FTE3600_DEVICE_ACQUISITION_ERROR : FTE3600_DEVICE_OK;
++}
++
++enum fte3600_device_error
++fte3600_device_ft9365_stop_up (struct fte3600_device_session *s)
++{
++  enum fte3600_device_error error;
++  if (!s || s->status.model != FTE3600_MODEL_FT9365 || s->status.chip_id != 0x9365)
++    return FTE3600_DEVICE_UNSUPPORTED;
++  if (s->active || s->status.state != FTE3600_DEVICE_IDLE || !s->ft9365_up_pending)
++    return FTE3600_DEVICE_NOT_READY;
++  begin (s);
++  error = ft9365_stop_up_io (s);
++  error = finish (s, error, error != FTE3600_DEVICE_OK);
++  if (!error)
++    s->ft9365_up_pending = 0;
++  return error;
++}
++
+ enum fte3600_device_error
+ fte3600_device_release_step (struct fte3600_device_session *s,
+                              int                           *released)
+@@ -619,6 +649,31 @@ fte3600_device_release_step (struct fte3600_device_session *s,
+     return FTE3600_DEVICE_BUSY;
+   if (s->status.state != FTE3600_DEVICE_IDLE)
+     return FTE3600_DEVICE_NOT_READY;
++  if (s->status.model == FTE3600_MODEL_FT9365 && s->status.chip_id == 0x9365)
++    {
++      uint16_t flags;
++      enum fte3600_device_error error = FTE3600_DEVICE_OK;
++      if (!s->ft9365_up_pending)
++        return FTE3600_DEVICE_NOT_READY;
++      begin (s);
++      s->status.component_error = fte3600_ft93xx_event_status (&s->modern_io, &flags);
++      if (s->status.component_error)
++        error = FTE3600_DEVICE_ACQUISITION_ERROR;
++      if (!error && (flags & 0x04))
++        {
++          error = ft9365_stop_up_io (s);
++        }
++      error = finish (s, error, error != FTE3600_DEVICE_OK);
++      if (!error)
++        {
++          *released = (flags & 0x04) != 0;
++          if (*released)
++            {
++              s->ft9365_up_pending = 0;
++            }
++        }
++      return error;
++    }
+   if (s->status.model != FTE3600_MODEL_FW9369)
+     return FTE3600_DEVICE_UNSUPPORTED;
+   if (!s->fw_maintenance_pending)
+@@ -812,3 +867,30 @@ fte3600_device_close (struct fte3600_device_session *s)
+       free (s);
+     }
+ }
++
++enum fte3600_device_error
++fte3600_device_ft9365_arm_up (struct fte3600_device_session *s)
++{
++  struct fte3600_ft93xx_fdt_diagnostics d;
++  struct fte3600_ft93xx_device *m;
++  enum fte3600_device_error error = FTE3600_DEVICE_OK;
++  if (!s || s->status.model != FTE3600_MODEL_FT9365 || s->status.chip_id != 0x9365)
++    return FTE3600_DEVICE_UNSUPPORTED;
++  if (s->active || s->status.state != FTE3600_DEVICE_IDLE || !s->status.image_available)
++    return FTE3600_DEVICE_NOT_READY;
++  if (s->ft9365_up_pending)
++    return FTE3600_DEVICE_OK;
++  m = &s->factory.word.modern;
++  begin (s);
++  s->status.component_error = fte3600_ft93xx_fdt_run (
++    m->preparation.identity.chip_id, m->preparation.foundry, m->preparation.features,
++    &m->preparation.state, &m->fdt, FTE3600_FT93XX_FDT_ARM, 0, NULL, 0, &s->modern_io, &d);
++  if (s->status.component_error || modern_transport_bad (&d.transport))
++    error = FTE3600_DEVICE_ACQUISITION_ERROR;
++  error = finish (s, error, error != FTE3600_DEVICE_OK);
++  if (!error)
++    {
++      s->ft9365_up_pending = 1;
++    }
++  return error;
++}
+diff --git a/libfprint/drivers/fte3600/ft93xx.c b/libfprint/drivers/fte3600/ft93xx.c
+index 6268812..969738c 100644
+--- a/libfprint/drivers/fte3600/ft93xx.c
++++ b/libfprint/drivers/fte3600/ft93xx.c
+@@ -1371,7 +1371,7 @@ fte3600_ft93xx_fdt_run (
+   struct fte3600_ft93xx_fdt_diagnostics *diagnostics)
+ {
+   if (state == NULL || controller == NULL || !valid_io (io) || foundry > 3 ||
+-      action < FTE3600_FT93XX_FDT_MEASURE || action > FTE3600_FT93XX_FDT_ARM ||
++      action < FTE3600_FT93XX_FDT_MEASURE || action > FTE3600_FT93XX_FDT_STOP ||
+       state->dac_polarity > 3 || state->subtract_baseline > 1 || state->configured > 1 ||
+       state->check_registers > 2 || controller->analog.fdt_configured > 1 ||
+       controller->analog.threshold_mode > 1 || controller->dac_calibrated > 1 ||
+@@ -1422,6 +1422,9 @@ fte3600_ft93xx_fdt_run (
+ 
+     case FTE3600_FT93XX_FDT_ARM: result = fdt_arm (&op, features, argument);
+       break;
++
++    case FTE3600_FT93XX_FDT_STOP: result = fdt_prepare (&op) && write_word (&op.wire, 0x1a84, 0x002f);
++      break;
+     }
+   return result ? FTE3600_FT93XX_OK : error;
+ }
+@@ -1950,3 +1953,13 @@ fte3600_ft93xx_io_from_recovery (
+   output->wait_ms = recovery_wait;
+   return FTE3600_FT93XX_OK;
+ }
++
++enum fte3600_ft93xx_status
++fte3600_ft93xx_event_status (const struct fte3600_ft93xx_io *io, uint16_t *value)
++{
++  enum fte3600_ft93xx_status error = FTE3600_FT93XX_TRANSPORT_ERROR;
++  struct operation op = {io, NULL, &error};
++  if (!valid_io (io) || !value)
++    return FTE3600_FT93XX_INVALID_ARGUMENT;
++  return read_word (&op, 0x1a82, value) ? FTE3600_FT93XX_OK : error;
++}
+diff --git a/libfprint/drivers/fte3600/fte3600.c b/libfprint/drivers/fte3600/fte3600.c
+index 8216502..69e498c 100644
+--- a/libfprint/drivers/fte3600/fte3600.c
++++ b/libfprint/drivers/fte3600/fte3600.c
+@@ -251,9 +251,14 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
+   if (self->needs_release)
+     {
+       enum fte3600_linux_runtime_error release =
++        work->action == FPI_DEVICE_ACTION_ENROLL ?
++        fte3600_linux_runtime_wait_enroll_release (self->runtime, cancel, 30000, &diag) :
+         fte3600_linux_runtime_wait_release (self->runtime, cancel, 30000, &diag);
+       if (release && release != FTE3600_RUNTIME_RELEASE_UNSUPPORTED)
+         {
++          if (release == FTE3600_RUNTIME_TIMEOUT && work->action == FPI_DEVICE_ACTION_ENROLL &&
++              self->identity.backend_model == 0x9365)
++            fp_warn ("Fingerprint release timed out");
+           error = runtime_error (&diag);
+           hardware_failed = TRUE;
+           goto out;
+@@ -262,7 +267,10 @@ worker (GTask *task, gpointer source, gpointer task_data, GCancellable *cancel)
+       if (!release)
+         observe_finger (task, FP_FINGER_STATUS_NEEDED);
+     }
+-  if (fte3600_linux_runtime_capture (self->runtime, cancel, 30000, &work->frame, &diag))
++  enum fte3600_linux_runtime_error capture_result = work->action == FPI_DEVICE_ACTION_ENROLL ?
++    fte3600_linux_runtime_capture_enroll (self->runtime, cancel, 30000, &work->frame, &diag) :
++    fte3600_linux_runtime_capture (self->runtime, cancel, 30000, &work->frame, &diag);
++  if (capture_result)
+     {
+       error = runtime_error (&diag);
+       hardware_failed = TRUE;
+@@ -325,6 +333,23 @@ out:
+   error = auth_error (g_steal_pointer (&error));
+   if (!error)
+     g_cancellable_set_error_if_cancelled (cancel, &error);
++  if (error && error->domain == FP_DEVICE_RETRY && work->action == FPI_DEVICE_ACTION_ENROLL &&
++      work->frame.status.model == FTE3600_MODEL_FT9365 && work->frame.status.chip_id == 0x9365 &&
++      self->needs_release)
++    {
++      enum fte3600_linux_runtime_error discard =
++        fte3600_linux_runtime_discard_enroll_retry (self->runtime, cancel, 8000, &diag);
++      if (discard)
++        {
++          g_clear_error (&error);
++          error = runtime_error (&diag);
++          hardware_failed = TRUE;
++        }
++      else
++        {
++          self->needs_release = FALSE;
++        }
++    }
+   if (error && work->action == FPI_DEVICE_ACTION_OPEN && self->runtime)
+     {
+       fte3600_linux_runtime_close (self->runtime, &diag);
+diff --git a/libfprint/drivers/fte3600/include/fte3600_device_session.h b/libfprint/drivers/fte3600/include/fte3600_device_session.h
+index 9ac8ca5..a404c35 100644
+--- a/libfprint/drivers/fte3600/include/fte3600_device_session.h
++++ b/libfprint/drivers/fte3600/include/fte3600_device_session.h
+@@ -109,6 +109,9 @@ enum fte3600_device_error fte3600_device_start (struct fte3600_device_session *)
+ enum fte3600_device_error fte3600_device_arm (struct fte3600_device_session *);
+ enum fte3600_device_error fte3600_device_irq (struct fte3600_device_session *);
+ enum fte3600_device_error fte3600_device_capture (struct fte3600_device_session *);
++/* FT9365 enrollment-only calibrated event handling. */
++enum fte3600_device_error fte3600_device_ft9365_arm_up (struct fte3600_device_session *);
++enum fte3600_device_error fte3600_device_ft9365_stop_up (struct fte3600_device_session *);
+ /* FW9369 only: poll one physical status and, on UP, confirm/maintain/rearm.
+  * released is written only on success; false means still held/unknown. The
+  * caller supplies bounded waits, deadline and cancellation through callbacks.
+diff --git a/libfprint/drivers/fte3600/include/fte3600_ft93xx.h b/libfprint/drivers/fte3600/include/fte3600_ft93xx.h
+index 897c60d..ea36914 100644
+--- a/libfprint/drivers/fte3600/include/fte3600_ft93xx.h
++++ b/libfprint/drivers/fte3600/include/fte3600_ft93xx.h
+@@ -24,6 +24,10 @@ enum fte3600_ft93xx_status {
+   FTE3600_FT93XX_IMAGE_SEARCH_FAILED = 8
+ };
+ 
++struct fte3600_ft93xx_io;
++/* Read the calibrated FDT event register using the existing CRC check. */
++enum fte3600_ft93xx_status fte3600_ft93xx_event_status (const struct fte3600_ft93xx_io *, uint16_t *);
++
+ struct fte3600_ft93xx_geometry
+ {
+   uint16_t width, height, extra_rows;
+@@ -103,7 +107,8 @@ enum fte3600_ft93xx_fdt_action {
+   FTE3600_FT93XX_FDT_ADJUST_BASE,
+   FTE3600_FT93XX_FDT_BASELINE,
+   FTE3600_FT93XX_FDT_WRITE_BASE,
+-  FTE3600_FT93XX_FDT_ARM
++  FTE3600_FT93XX_FDT_ARM,
++  FTE3600_FT93XX_FDT_STOP
+ };
+ 
+ struct fte3600_ft93xx_fdt_diagnostics
+diff --git a/libfprint/drivers/fte3600/include/fte3600_linux_runtime.h b/libfprint/drivers/fte3600/include/fte3600_linux_runtime.h
+index 9d44e6e..026a1da 100644
+--- a/libfprint/drivers/fte3600/include/fte3600_linux_runtime.h
++++ b/libfprint/drivers/fte3600/include/fte3600_linux_runtime.h
+@@ -86,6 +86,10 @@ enum fte3600_linux_runtime_error fte3600_linux_runtime_capture (struct fte3600_l
+                                                                 uint32_t timeout_ms,
+                                                                 struct fte3600_linux_runtime_frame *,
+                                                                 struct fte3600_linux_runtime_diagnostic *);
++/* Enrollment capture and release for the FT9365 contact gate. */
++enum fte3600_linux_runtime_error fte3600_linux_runtime_capture_enroll (struct fte3600_linux_runtime *, GCancellable *, uint32_t, struct fte3600_linux_runtime_frame *, struct fte3600_linux_runtime_diagnostic *);
++enum fte3600_linux_runtime_error fte3600_linux_runtime_wait_enroll_release (struct fte3600_linux_runtime *, GCancellable *, uint32_t, struct fte3600_linux_runtime_diagnostic *);
++enum fte3600_linux_runtime_error fte3600_linux_runtime_discard_enroll_retry (struct fte3600_linux_runtime *, GCancellable *, uint32_t, struct fte3600_linux_runtime_diagnostic *);
+ /* FT9368 uses healthy information observations. FW9369 uses physical UP flags,
+  * three reviewed FDT confirmations, retained maintenance and Down rearm;
+  * repeated calls after completion do not repeat maintenance. Partial failure,
+diff --git a/libfprint/drivers/fte3600/libfprint_backend_fake.c b/libfprint/drivers/fte3600/libfprint_backend_fake.c
+index 70a9fae..18e0ede 100644
+--- a/libfprint/drivers/fte3600/libfprint_backend_fake.c
++++ b/libfprint/drivers/fte3600/libfprint_backend_fake.c
+@@ -221,3 +221,31 @@ fte3600_linux_runtime_error_string (enum fte3600_linux_runtime_error code)
+   (void) code;
+   return "synthetic backend failure (TEST ONLY)";
+ }
++
++enum fte3600_linux_runtime_error
++fte3600_linux_runtime_capture_enroll (struct fte3600_linux_runtime *runtime, GCancellable *cancel,
++                                      uint32_t timeout, struct fte3600_linux_runtime_frame *frame,
++                                      struct fte3600_linux_runtime_diagnostic *diag)
++{
++  return fte3600_linux_runtime_capture (runtime, cancel, timeout, frame, diag);
++}
++enum fte3600_linux_runtime_error
++fte3600_linux_runtime_wait_enroll_release (struct fte3600_linux_runtime *runtime, GCancellable *cancel,
++                                            uint32_t timeout, struct fte3600_linux_runtime_diagnostic *diag)
++{
++  return fte3600_linux_runtime_wait_release (runtime, cancel, timeout, diag);
++}
++
++enum fte3600_linux_runtime_error
++fte3600_linux_runtime_discard_enroll_retry (struct fte3600_linux_runtime *runtime, GCancellable *cancel,
++                                            uint32_t timeout, struct fte3600_linux_runtime_diagnostic *diag)
++{
++  (void) timeout;
++  if (g_cancellable_is_cancelled (cancel))
++    {
++      runtime->failed = TRUE;
++      return failure (diag, FTE3600_RUNTIME_CANCELLED);
++    }
++  trace (runtime->control, "release-retry-discarded");
++  return failure (diag, FTE3600_RUNTIME_OK);
++}
+diff --git a/libfprint/drivers/fte3600/linux_runtime.c b/libfprint/drivers/fte3600/linux_runtime.c
+index 35a943d..22093aa 100644
+--- a/libfprint/drivers/fte3600/linux_runtime.c
++++ b/libfprint/drivers/fte3600/linux_runtime.c
+@@ -25,6 +25,7 @@ struct fte3600_linux_runtime
+   gint64                         deadline;
+   int                            timed_out;
+   int                            needs_reopen;
++  int                            ft9365_release_pending;
+   int                            cs_retried;
+   unsigned                       recoveries;
+ };
+@@ -485,10 +486,10 @@ wait_fw_release (struct fte3600_linux_runtime            *r,
+   r->needs_reopen = 1;
+   return rc;
+ }
+-enum fte3600_linux_runtime_error
+-fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
+-                               GCancellable *cancel, uint32_t timeout, struct fte3600_linux_runtime_frame *frame,
+-                               struct fte3600_linux_runtime_diagnostic *d)
++static enum fte3600_linux_runtime_error
++capture (struct fte3600_linux_runtime *r,
++         GCancellable *cancel, uint32_t timeout, struct fte3600_linux_runtime_frame *frame,
++         struct fte3600_linux_runtime_diagnostic *d, int enrollment)
+ {
+   struct fte3600_linux_runtime_frame next = {0};
+   enum fte3600_linux_runtime_error rc;
+@@ -593,6 +594,16 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
+       break;
+     }
+   fte3600_device_get_status (r->session, &next.status);
++  if(enrollment && next.status.model == FTE3600_MODEL_FT9365 && next.status.chip_id == 0x9365)
++    {
++      e = fte3600_device_ft9365_arm_up (r->session);
++      if(e)
++        {
++          rc = session_error (r, e, d);
++          goto done;
++        }
++      r->ft9365_release_pending = 1;
++    }
+   next.stride = next.status.width;
+   next.length = next.stride * next.status.height;
+   next.pixels = malloc (next.length);
+@@ -618,7 +629,7 @@ fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r,
+ done:
+   if(rc)
+     {
+-      if(next.status.model == FTE3600_MODEL_FW9369)
++      if(next.status.model == FTE3600_MODEL_FW9369 || r->ft9365_release_pending)
+         r->needs_reopen = 1;
+       fte3600_device_cancel (r->session);
+     }
+@@ -627,6 +638,18 @@ done:
+   return rc;
+ }
+ enum fte3600_linux_runtime_error
++fte3600_linux_runtime_capture (struct fte3600_linux_runtime *r, GCancellable *cancel, uint32_t timeout,
++                               struct fte3600_linux_runtime_frame *frame, struct fte3600_linux_runtime_diagnostic *d)
++{
++  return capture (r, cancel, timeout, frame, d, 0);
++}
++enum fte3600_linux_runtime_error
++fte3600_linux_runtime_capture_enroll (struct fte3600_linux_runtime *r, GCancellable *cancel, uint32_t timeout,
++                                      struct fte3600_linux_runtime_frame *frame, struct fte3600_linux_runtime_diagnostic *d)
++{
++  return capture (r, cancel, timeout, frame, d, 1);
++}
++enum fte3600_linux_runtime_error
+ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *r,
+                                     GCancellable *cancel, uint32_t timeout, struct fte3600_linux_runtime_diagnostic *d)
+ {
+@@ -639,14 +662,18 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *r,
+   if(r->needs_reopen)
+     return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
+   fte3600_device_get_status (r->session, &status);
+-  if(status.model != FTE3600_MODEL_FT9368 && status.model != FTE3600_MODEL_FW9369)
++  if(status.model != FTE3600_MODEL_FT9368 && status.model != FTE3600_MODEL_FW9369 && !r->ft9365_release_pending)
+     return result (d, FTE3600_RUNTIME_RELEASE_UNSUPPORTED, ENOTSUP, FTE3600_DEVICE_UNSUPPORTED);
+   if(status.state != FTE3600_DEVICE_IDLE)
+     return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
+   begin (r, cancel, timeout);
+-  if(status.model == FTE3600_MODEL_FW9369)
++  if(status.model == FTE3600_MODEL_FW9369 || r->ft9365_release_pending)
+     {
+       rc = wait_fw_release (r, d);
++      if(!rc && r->ft9365_release_pending)
++        {
++          r->ft9365_release_pending = 0;
++        }
+       end (r);
+       return rc;
+     }
+@@ -674,6 +701,62 @@ fte3600_linux_runtime_wait_release (struct fte3600_linux_runtime *r,
+   return rc;
+ }
+ enum fte3600_linux_runtime_error
++fte3600_linux_runtime_wait_enroll_release (struct fte3600_linux_runtime *r, GCancellable *cancel,
++                                          uint32_t timeout, struct fte3600_linux_runtime_diagnostic *d)
++{
++  struct fte3600_device_status status;
++  enum fte3600_device_error e;
++  if (!r || !r->session || !timeout)
++    return result (d, FTE3600_RUNTIME_INVALID_ARGUMENT, EINVAL, FTE3600_DEVICE_OK);
++  if (r->needs_reopen)
++    return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
++  fte3600_device_get_status (r->session, &status);
++  if (status.model == FTE3600_MODEL_FT9365 && status.chip_id == 0x9365)
++    timeout = MIN (timeout, 8000u);
++  if (status.model == FTE3600_MODEL_FT9365 && status.chip_id == 0x9365 && !r->ft9365_release_pending)
++    {
++      begin (r, cancel, timeout);
++      e = fte3600_device_ft9365_arm_up (r->session);
++      end (r);
++      if (e)
++        {
++          r->needs_reopen = 1;
++          return session_error (r, e, d);
++        }
++      r->ft9365_release_pending = 1;
++    }
++  return fte3600_linux_runtime_wait_release (r, cancel, timeout, d);
++}
++enum fte3600_linux_runtime_error
++fte3600_linux_runtime_discard_enroll_retry (struct fte3600_linux_runtime *r, GCancellable *cancel,
++                                          uint32_t timeout, struct fte3600_linux_runtime_diagnostic *d)
++{
++  enum fte3600_device_error e;
++  diagnostic_clear (d);
++  if (!r || !r->session || !timeout)
++    return result (d, FTE3600_RUNTIME_INVALID_ARGUMENT, EINVAL, FTE3600_DEVICE_OK);
++  if (r->needs_reopen || !r->ft9365_release_pending)
++    return result (d, FTE3600_RUNTIME_NOT_READY, 0, FTE3600_DEVICE_NOT_READY);
++  begin (r, cancel, timeout);
++  e = fte3600_device_ft9365_stop_up (r->session);
++  if (e)
++    {
++      r->needs_reopen = 1;
++      end (r);
++      return session_error (r, e, d);
++    }
++  if (cancelled (r))
++    {
++      enum fte3600_linux_runtime_error rc = wait_error (r, ECANCELED, d);
++      r->needs_reopen = 1;
++      end (r);
++      return rc;
++    }
++  r->ft9365_release_pending = 0;
++  end (r);
++  return FTE3600_RUNTIME_OK;
++}
++enum fte3600_linux_runtime_error
+ fte3600_linux_runtime_get_status (const struct fte3600_linux_runtime *r,
+                                   struct fte3600_device_status       *status)
+ {
+diff --git a/tests/test-fte3600-linux-runtime.c b/tests/test-fte3600-linux-runtime.c
+index 007a28d..d348e08 100644
+--- a/tests/test-fte3600-linux-runtime.c
++++ b/tests/test-fte3600-linux-runtime.c
+@@ -23,12 +23,20 @@ static struct bus *runtime_bus;
+ static uint64_t wait_remaining;
+ static int irq_enabled=1;
+ static int byte_contact=1,byte_unhealthy;
++static int ft9365_release_observation, ft9365_reads, ft9365_release_after;
+ static GCancellable *cancel_in_poll;
+ static gint poll_waiting;
+ static uint32_t runtime_spi(uint8_t *data,size_t length)
+ {
+     int post_start=runtime_bus->next==runtime_bus->fixture->count;
+     uint8_t command=data[0];uint32_t rc=spi(runtime_bus,data,length);
++    if(post_start && ft9365_release_observation && command==4 && length==10 &&
++       data[2]==0x9a && data[3]==0x82) {
++        ++ft9365_reads;
++        if(ft9365_release_observation==2) return UINT32_C(0xc0000185);
++        data[6]=0;data[7]=ft9365_reads >= ft9365_release_after ? 0x05 : 0;
++        data[8]=data[9]=0;
++    }
+     if(post_start&&command==0x91&&length==39&&runtime_bus->fixture->model==FTE3600_MODEL_FT9368) {
+         data[8]=data[9]=byte_contact?0x11:0;
+         if(byte_unhealthy) data[26]=0;
+@@ -163,6 +171,67 @@ static void runtime_cases(const struct fixture *f)
+     fte3600_linux_runtime_frame_clear(&frame);CHECK(!fte3600_linux_runtime_close(r,&d));teardown_bus();
+     CHECK(fd_count()==before);printf("runtime PASS %s\n",f->name);
+ }
++static void ft9365_enrollment_release(const struct fixture *f)
++{
++    struct fte3600_linux_runtime *r=NULL;
++    struct fte3600_linux_runtime_config c=runtime_config();
++    struct fte3600_linux_runtime_diagnostic d;
++    struct fte3600_linux_runtime_frame frame={0};
++    unsigned before=fd_count();
++    setup_bus(f);
++    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
++    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
++    CHECK(frame.status.image_sequence==1 && runtime_bus->frames==1);
++    fte3600_linux_runtime_frame_clear(&frame);
++    ft9365_release_observation=1;ft9365_reads=0;ft9365_release_after=4;
++    CHECK(!fte3600_linux_runtime_wait_enroll_release(r,NULL,10000,&d));
++    CHECK(ft9365_reads==4 && runtime_bus->frames==1);
++    ft9365_release_observation=0;
++    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
++    CHECK(frame.status.image_sequence==2 && runtime_bus->frames==2);
++    fte3600_linux_runtime_frame_clear(&frame);
++    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);
++    teardown_bus();
++
++    /* A rejected frame is not an accepted enrollment sample. Stopping its Up
++     * arm permits an immediate replacement without a physical release. */
++    setup_bus(f);
++    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
++    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
++    CHECK(runtime_bus->frames==1);
++    fte3600_linux_runtime_frame_clear(&frame);
++    CHECK(!fte3600_linux_runtime_discard_enroll_retry(r,NULL,10000,&d));
++    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
++    CHECK(runtime_bus->frames==2 && frame.status.image_sequence==2);
++    fte3600_linux_runtime_frame_clear(&frame);
++    ft9365_release_observation=1;ft9365_reads=0;ft9365_release_after=4;
++    CHECK(!fte3600_linux_runtime_wait_enroll_release(r,NULL,10000,&d));
++    CHECK(ft9365_reads==4 && runtime_bus->frames==2);
++    ft9365_release_observation=0;
++    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);teardown_bus();
++
++    setup_bus(f);
++    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
++    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
++    fte3600_linux_runtime_frame_clear(&frame);
++    GCancellable *cancel=g_cancellable_new();g_cancellable_cancel(cancel);
++    CHECK(fte3600_linux_runtime_wait_enroll_release(r,cancel,10000,&d)==FTE3600_RUNTIME_CANCELLED);
++    CHECK(fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d)==FTE3600_RUNTIME_NOT_READY);
++    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);
++    g_object_unref(cancel);teardown_bus();
++
++    setup_bus(f);
++    CHECK(!fte3600_linux_runtime_open(&c,NULL,&r,&d));
++    CHECK(!fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d));
++    fte3600_linux_runtime_frame_clear(&frame);
++    ft9365_release_observation=2;ft9365_reads=0;
++    CHECK(fte3600_linux_runtime_wait_enroll_release(r,NULL,10000,&d)!=FTE3600_RUNTIME_OK);
++    CHECK(fte3600_linux_runtime_capture_enroll(r,NULL,10000,&frame,&d)==FTE3600_RUNTIME_NOT_READY);
++    CHECK(runtime_bus->frames==1);
++    ft9365_release_observation=0;
++    CHECK(!fte3600_linux_runtime_close(r,&d)&&fd_count()==before);teardown_bus();
++    puts("runtime FT9365 enrollment requires physical Up before another frame");
++}
+ static gpointer glib_cancel_thread(gpointer cancel)
+ {
+     while(!g_atomic_int_get(&poll_waiting)) g_thread_yield();
+@@ -439,6 +508,8 @@ int main(void)
+         if(!fixtures[i].unconfirmed_stop&&(is_legacy(&fixtures[i])||fixtures[i].model==FTE3600_MODEL_FT9368))
+             supplied_firmware_case(&fixtures[i]);
+     for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i) if(fixtures[i].model==FTE3600_MODEL_FT9365) { threaded_cancel(&fixtures[i]);break; }
++    for(size_t i=0;i<G_N_ELEMENTS(fixtures);++i)
++        if(fixtures[i].chip==0x9365) { ft9365_enrollment_release(&fixtures[i]);break; }
+     rejected_startups();chip_select_negotiation();legacy_chip_select_negotiation();
+     CHECK(sync_pairs>0);
+     printf("runtime: %u release/sync pairs passed syscall-order guard through full startup and lifecycle LOAD\n",sync_pairs);

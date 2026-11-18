@@ -95,6 +95,18 @@ class InstallTests(unittest.TestCase):
             self.run_action('install')
         self.assertFalse(self.target.exists())
 
+    def test_game_mode_auth_agent_uses_trusted_executable(self):
+        agent = self.bin / 'polkit-kde-authentication-agent-1'
+        agent.write_text('fixture')
+        self.security[agent.resolve()] = SimpleNamespace(st_uid=1000, st_mode=stat.S_IFREG | 0o755)
+        with self.assertRaisesRegex(ValueError, 'root-owned'):
+            installer.run('install', self.home, self.bin, agent)
+        self.assertFalse(self.target.exists())
+        self.security.clear()
+        installer.run('install', self.home, self.bin, agent)
+        profile = json.loads((self.target / 'profile.json').read_text())
+        self.assertEqual(profile['game_mode_auth_agent'], str(agent.resolve()))
+
     def test_missing_cli_prevents_mutation(self):
         (self.bin / 'fprintd-list').unlink()
         with self.assertRaisesRegex(ValueError, 'Required executable'):

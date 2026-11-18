@@ -6,12 +6,22 @@ import hashlib
 import json
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import signal
 import stat
 import tempfile
+
+ENROLLMENT_LIMIT = 6
+ENROLL_RETRY_TIMEOUT_SECONDS = 12
+FINGER_SLOTS = tuple(
+    side + '-' + finger for side in ('right', 'left')
+    for finger in ('index-finger', 'middle-finger', 'ring-finger', 'little-finger', 'thumb')
+)
+AUTH_AGENT_NAME = 'org.kde.polkit-kde-authentication-agent-1'
+STOCK_AUTH_AGENT = '/usr/lib/polkit-kde-authentication-agent-1'
+
 
 PACKAGES = ('fprintd', 'libfprint', 'libgusb')
 PACMAN_CACHE = Path('/var/cache/pacman/pkg')
@@ -29,10 +39,13 @@ class Plugin:
         self.verify_path = config['verify_command']
         self.list_path = config['list_command']
         self.enroll_command = config['enroll_command']
+        self.game_mode_auth_agent = config.get('game_mode_auth_agent')
         self.user = os.environ.get('DECKY_USER', 'deck')
         self.lock = asyncio.Lock()
         self.proc = None
         self.cancelled = False
+        self.enroll_state = None
+        self.enroll_unit = None
         self.package_lock = asyncio.Lock()
         self.repairing = False
         self.repair_task = None
@@ -108,10 +121,14 @@ class Plugin:
 
     async def cancel(self):
         self.cancelled = True
+        unit = getattr(self, 'enroll_unit', None)
+        stopped = await self._stop_unit(unit) if unit else True
+        if stopped and unit and self.enroll_unit == unit:
+            self.enroll_unit = None
         proc = self.proc
         if proc is not None:
             await self._stop(proc)
-        return {'cancelled': True}
+        return {'cancelled': stopped}
 
     async def status(self):
         if self.lock.locked():
@@ -125,6 +142,287 @@ class Plugin:
                                                and not os.access(self.verify_path, os.X_OK)
                                                and self.package_lock.locked()),
                     'repairable': self.verify_path == '/usr/bin/fprintd-verify' and not os.access(self.verify_path, os.X_OK)}
+
+    def _account(self):
+        # Decky is privileged; the enrollment client must belong to the Steam user.
+        import pwd, os
+        name = os.environ.get('DECKY_USER', '')
+        if not name or name == 'root':
+            raise ValueError('missing Steam user')
+        account = pwd.getpwnam(name)
+        if account.pw_uid == 0:
+            raise ValueError('root account')
+        return account
+
+    async def _user_process(self, *argv):
+        import os
+        account = self._account()
+        runtime = '/run/user/' + str(account.pw_uid)
+        return await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            user=account.pw_uid, group=account.pw_gid,
+            extra_groups=os.getgrouplist(account.pw_name, account.pw_gid),
+            env={'PATH': '/usr/bin:/bin', 'LANG': 'C', 'HOME': account.pw_dir,
+                 'USER': account.pw_name, 'LOGNAME': account.pw_name,
+                 'XDG_RUNTIME_DIR': runtime, 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=' + runtime + '/bus'})
+
+    async def _user_capture(self, *argv):
+        proc = await self._user_process(*argv)
+        try:
+            output, _ = await asyncio.wait_for(proc.communicate(), 10)
+            return proc.returncode, output.decode('utf-8', errors='replace')
+        except BaseException:
+            await self._stop(proc)
+            raise
+
+    async def _stop_unit(self, unit):
+        try:
+            code, _ = await self._user_capture('/usr/bin/systemctl', '--user', 'stop', unit)
+            if code == 0:
+                return True
+            code, state = await self._user_capture('/usr/bin/systemctl', '--user', 'show', unit,
+                '--property=LoadState', '--property=ActiveState')
+            values = dict(line.split('=', 1) for line in state.splitlines() if '=' in line)
+            return code == 0 and (values.get('LoadState') == 'not-found' or values.get('ActiveState') in ('inactive', 'failed'))
+        except (OSError, ValueError, KeyError, asyncio.TimeoutError):
+            return False
+
+    async def _list_fingerprints(self):
+        code, text = await self._user_capture('/usr/bin/busctl', '--system', 'call',
+            'net.reactivated.Fprint', '/net/reactivated/Fprint/Manager',
+            'net.reactivated.Fprint.Manager', 'GetDefaultDevice')
+        match = re.fullmatch(r'o "(/net/reactivated/Fprint/Device/\d+)"\s*', text)
+        if code != 0 or not match:
+            return None
+        path = match.group(1)
+        args = ('/usr/bin/busctl', '--system', 'get-property', 'net.reactivated.Fprint', path,
+                'net.reactivated.Fprint.Device')
+        ncode, name = await self._user_capture(*args, 'name')
+        scode, stages = await self._user_capture(*args, 'num-enroll-stages')
+        device_name = 'FocalTech FTE3600 (host BRISK)'
+        if ncode != 0 or scode != 0 or name.strip() != 's "' + device_name + '"' or stages.strip() != 'i 9':
+            return None
+        account = self._account()
+        code, listed = await self._user_capture('/usr/bin/systemd-run', '--user', '--quiet', '--pipe', '--wait', '--collect',
+            '--property=RuntimeMaxSec=10', '--setenv=LC_ALL=C', '--', self.list_path, account.pw_name)
+        lines = listed.splitlines()
+        if code != 0 or lines[:3] != ['found 1 devices', 'Device at ' + path, 'Using device ' + path]:
+            return None
+        empty = 'User ' + account.pw_name + ' has no fingers enrolled for ' + device_name + '.'
+        header = 'Fingerprints for user ' + account.pw_name + ' on ' + device_name + ' (press):'
+        if lines[3:] == [empty]:
+            entries = []
+        elif len(lines) > 4 and lines[3] == header:
+            entries = []
+            for index, line in enumerate(lines[4:]):
+                match = re.fullmatch(r' - #' + str(index) + r': ((?:right|left)-(?:thumb|(?:index|middle|ring|little)-finger))', line)
+                if not match or match.group(1) in entries:
+                    return None
+                entries.append(match.group(1))
+        else:
+            return None
+        return entries
+
+    async def fingerprints(self):
+        if self.lock.locked():
+            return {'result': 'busy'}
+        async with self.lock:
+            try:
+                entries = await self._list_fingerprints()
+                if entries is not None:
+                    return {'result': 'available', 'count': len(entries), 'limit': ENROLLMENT_LIMIT}
+            except (OSError, ValueError, KeyError, asyncio.TimeoutError):
+                pass
+            return {'result': 'unavailable', 'reason': 'list'}
+
+    async def _prepare_game_mode_auth(self):
+        code, _ = await self._user_capture('/usr/bin/systemctl', '--user', 'is-active', '--quiet',
+                                           'gamescope-session.target')
+        if code != 0:
+            # The desktop session provides its own authentication agent.
+            return None
+
+        runtime = '/run/user/' + str(self._account().pw_uid)
+        code, environment = await self._user_capture('/usr/bin/cat', runtime + '/gamescope-environment')
+        displays = re.findall(r'^DISPLAY=(:[0-9]+)$', environment, re.M)
+        if code != 0 or len(displays) != 1:
+            return False
+        display = displays[0]
+        owner = ('/usr/bin/busctl', '--user', '--no-pager', 'status', AUTH_AGENT_NAME)
+        code, status = await self._user_capture(*owner)
+        if code != 0:
+            # Start the KDE agent as the Steam user on Gamescope's active display.
+            agent = self.game_mode_auth_agent or STOCK_AUTH_AGENT
+            keyboard_env = ()
+            if self.game_mode_auth_agent:
+                keyboard_env = ('--setenv=BOILER_FINGERPRINT_GAMESCOPE_KEYBOARD=1',
+                                '--setenv=QT_IM_MODULE=qtvirtualkeyboard',
+                                '--setenv=QT_VIRTUALKEYBOARD_DESKTOP_DISABLE=1')
+            code, _ = await self._user_capture(
+                '/usr/bin/systemd-run', '--user', '--quiet', '--collect',
+                '--unit=boiler-fingerprint-gamemode-auth.service',
+                '--property=Type=dbus', '--property=BusName=' + AUTH_AGENT_NAME,
+                '--property=BindsTo=gamescope-session.target', '--property=After=gamescope-session.target',
+                '--property=TimeoutStartSec=5s', '--setenv=DISPLAY=' + display,
+                '--setenv=QT_QPA_PLATFORM=xcb', '--setenv=QT_SCALE_FACTOR=1.6',
+                *keyboard_env, '--', agent)
+            if code != 0:
+                return False
+            code, status = await self._user_capture(*owner)
+        pid = re.search(r'^PID=([1-9][0-9]*)$', status, re.M)
+        return (display, pid.group(1)) if code == 0 and pid else False
+
+    async def _focus_game_mode_auth(self, display, pid):
+        # Gamescope leaves ordinary X11 windows under Steam. Ask it to show
+        # the system agent's window and give it keyboard focus during auth.
+        env = ('/usr/bin/env', 'DISPLAY=' + display)
+        try:
+            code, result = await self._user_capture(*env, '/usr/bin/xdotool', 'search',
+                                                     '--sync', '--onlyvisible', '--pid', pid)
+            windows = result.splitlines()
+            if code != 0 or len(windows) != 1 or not re.fullmatch(r'[1-9][0-9]*', windows[0]):
+                return
+            window_id = windows[0]
+            tool = (*env, '/usr/bin/xdotool')
+            screen_code, screen = await self._user_capture(*tool, 'getdisplaygeometry')
+            size_code, size = await self._user_capture(*tool, 'getwindowgeometry', '--shell', window_id)
+            display_size = re.fullmatch(r'([1-9][0-9]*) ([1-9][0-9]*)\s*', screen)
+            geometry = dict(re.findall(r'^(WIDTH|HEIGHT)=([1-9][0-9]*)$', size, re.M))
+            if screen_code == 0 and size_code == 0 and display_size and geometry.keys() == {'WIDTH', 'HEIGHT'}:
+                screen_width, screen_height = map(int, display_size.groups())
+                width, height = (int(geometry[key]) for key in ('WIDTH', 'HEIGHT'))
+                x = max(0, (screen_width - width) // 2)
+                y = max(0, min(screen_height // 10, screen_height // 2 - height))
+                await self._user_capture(*tool, 'windowmove', window_id, str(x), str(y))
+            window = (*env, '/usr/bin/xprop', '-id', window_id)
+            code, _ = await self._user_capture(*window, '-f', 'STEAM_OVERLAY', '32c',
+                                               '-set', 'STEAM_OVERLAY', '1')
+            if code == 0:
+                await self._user_capture(*window, '-f', 'STEAM_INPUT_FOCUS', '32c',
+                                         '-set', 'STEAM_INPUT_FOCUS', '1')
+        except (OSError, ValueError, KeyError, asyncio.TimeoutError):
+            pass
+
+    async def enroll(self):
+        if self.lock.locked() or self.enroll_unit:
+            return {'result': 'busy'}
+        async with self.lock:
+            import uuid
+            self.cancelled = False
+            self.enroll_state = {'result': 'starting', 'samples': 0}
+            unit = None
+            auth_focus = None
+            try:
+                entries = await self._list_fingerprints()
+                if self.cancelled:
+                    return {'result': 'cancelled'}
+                if entries is None:
+                    return {'result': 'unavailable', 'reason': 'list'}
+                if len(entries) >= ENROLLMENT_LIMIT:
+                    return {'result': 'full'}
+                # fprintd requires a slot ID. Users only see their saved prints.
+                finger = next(slot for slot in FINGER_SLOTS if slot not in entries)
+                command = self.enroll_command.removesuffix(' -f right-index-finger')
+                command_path = PurePosixPath(command)
+                if not command_path.is_absolute() or command_path.name != 'fprintd-enroll':
+                    return {'result': 'unavailable', 'reason': 'session'}
+                auth = await self._prepare_game_mode_auth()
+                if auth is False:
+                    return {'result': 'unavailable', 'reason': 'agent'}
+                if self.cancelled:
+                    return {'result': 'cancelled'}
+                self.enroll_state = {'result': 'identifying', 'samples': 0}
+                unit = 'boiler-fingerprint-enroll-' + uuid.uuid4().hex + '.service'
+                self.enroll_unit = unit
+                self.proc = await self._user_process('/usr/bin/systemd-run', '--user', '--pipe', '--wait', '--collect',
+                    '--unit=' + unit, '--property=RuntimeMaxSec=180', '--property=TimeoutStopSec=3s',
+                    '--setenv=LC_ALL=C', '--', '/usr/bin/stdbuf', '-oL', '-eL',
+                    command, '-f', finger, self._account().pw_name)
+                if self.cancelled:
+                    return {'result': 'cancelled'}
+
+                async def read_output():
+                    nonlocal auth_focus
+                    identified = False
+                    samples = 0
+                    complete = False
+                    authorization_denied = False
+                    retry_deadline = None
+                    clock = asyncio.get_running_loop().time
+                    while True:
+                        if retry_deadline is None:
+                            line = await self.proc.stdout.readline()
+                        else:
+                            try:
+                                line = await asyncio.wait_for(self.proc.stdout.readline(), retry_deadline - clock())
+                            except asyncio.TimeoutError:
+                                return 'retry-timeout'
+                        if not line:
+                            break
+                        decoded = line.decode('utf-8', errors='replace')
+                        match = re.fullmatch(r'Enroll result: (enroll-[a-z-]+)\s*', decoded)
+                        if not match:
+                            if auth and auth_focus is None and decoded.rstrip() == f'Enrolling {finger} finger.':
+                                auth_focus = asyncio.create_task(self._focus_game_mode_auth(*auth))
+                            if decoded.startswith('Enroll result:'):
+                                return 'capture'
+                            if 'net.reactivated.Fprint.Error.PermissionDenied' in decoded or 'Not Authorized:' in decoded:
+                                authorization_denied = True
+                            continue
+                        event = match.group(1)
+                        if complete:
+                            return 'capture'
+                        if event == 'enroll-stage-passed':
+                            retry_deadline = None
+                            if not identified:
+                                identified = True
+                            elif samples < 7:
+                                samples += 1
+                            else:
+                                return 'capture'
+                            self.enroll_state = {'result': 'sampling', 'samples': samples}
+                        elif event == 'enroll-completed':
+                            complete = identified and samples == 7
+                            if not complete:
+                                return 'capture'
+                            samples = 8
+                            retry_deadline = None
+                            self.enroll_state = {'result': 'sampling', 'samples': samples}
+                        elif event in ('enroll-retry-scan', 'enroll-swipe-too-short', 'enroll-finger-not-centered', 'enroll-remove-and-retry', 'enroll-too-fast'):
+                            self.enroll_state = {'result': 'retry', 'samples': samples}
+                            retry_deadline = clock() + ENROLL_RETRY_TIMEOUT_SECONDS
+                        elif event == 'enroll-duplicate':
+                            return 'duplicate'
+                        else:
+                            return 'capture'
+                    await self.proc.wait()
+                    if authorization_denied:
+                        return 'authorization'
+                    return None if complete and self.proc.returncode == 0 else 'capture'
+                reason = await asyncio.wait_for(read_output(), 185)
+                if self.cancelled:
+                    return {'result': 'cancelled'}
+                if reason is None:
+                    return {'result': 'complete', 'samples': 8}
+                return {'result': 'unavailable', 'reason': reason, 'samples': self.enroll_state.get('samples', 0)}
+            except (OSError, ValueError, KeyError, asyncio.TimeoutError):
+                return {'result': 'cancelled'} if self.cancelled else {'result': 'unavailable', 'reason': 'session'}
+            finally:
+                if auth_focus is not None:
+                    auth_focus.cancel()
+                    await asyncio.gather(auth_focus, return_exceptions=True)
+                if unit is not None:
+                    stopped = await self._stop_unit(unit)
+                    if not stopped:
+                        stopped = await self._stop_unit(unit)
+                    if self.proc is not None:
+                        await self._stop(self.proc)
+                        self.proc = None
+                    self.enroll_unit = None if stopped else unit
+                self.enroll_state = None
+
+    async def enroll_progress(self):
+        return self.enroll_state or {'result': 'idle'}
 
     async def _stop_command(self, proc, completion):
         for sig in (signal.SIGTERM, signal.SIGKILL):

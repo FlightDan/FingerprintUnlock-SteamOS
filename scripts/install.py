@@ -50,10 +50,10 @@ def trusted_executable(path):
     for directory in directories:
         info = _security_stat(directory)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-            raise ValueError('fprintd path must be in root-owned directories that are not group/other writable')
+            raise ValueError('Executable path must be in root-owned directories that are not group/other writable')
     info = _security_stat(resolved)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-        raise ValueError('fprintd executable must be root-owned and not group/other writable')
+        raise ValueError('Executable must be root-owned and not group/other writable')
     if not os.access(resolved, os.X_OK):
         raise ValueError('Required executable missing or not executable: ' + str(path))
     return str(resolved)
@@ -105,7 +105,7 @@ def restart_if_active(active):
         raise RuntimeError('Decky did not become active after restart')
 
 
-def run(action, home, bin_dir):
+def run(action, home, bin_dir, game_mode_auth_agent=None):
     plugins, binaries = preflight(home, bin_dir, require_binaries=action != 'uninstall')
     target = plugins / FOLDER
     if target.is_symlink() or (target.exists() and not target.is_dir()):
@@ -135,7 +135,11 @@ def run(action, home, bin_dir):
     payload = {}
     if action == 'install':
         payload = {name: (ROOT / src).read_bytes() for name, src in FILES.items()}
-        payload['profile.json'] = (json.dumps({'verify_command': binaries['fprintd-verify'], 'list_command': binaries['fprintd-list'], 'enroll_command': binaries['fprintd-enroll']}, indent=2) + '\n').encode()
+        profile = {'verify_command': binaries['fprintd-verify'], 'list_command': binaries['fprintd-list'],
+                   'enroll_command': binaries['fprintd-enroll']}
+        if game_mode_auth_agent:
+            profile['game_mode_auth_agent'] = trusted_executable(game_mode_auth_agent)
+        payload['profile.json'] = (json.dumps(profile, indent=2) + '\n').encode()
     if action == 'install' and old is not None:
         for name in set(payload) | set(old):
             path = target / name
@@ -225,6 +229,7 @@ def main():
                         default='install')
     parser.add_argument('--decky-home', help='existing Decky homebrew directory')
     parser.add_argument('--fprintd-bin', default='/usr/bin', help='directory containing fprintd CLI programs')
+    parser.add_argument('--game-mode-auth-agent', help='install action: trusted KDE agent built with the Game Mode keyboard patch')
     parser.add_argument('--kde-pam-package',
                         help='kde-pam action: fprintd package archive providing usr/lib/security/pam_fprintd.so')
     args = parser.parse_args()
@@ -238,7 +243,7 @@ def main():
             else:
                 return module.check()
             return 0
-        run(args.action, decky_home(args.decky_home), args.fprintd_bin)
+        run(args.action, decky_home(args.decky_home), args.fprintd_bin, args.game_mode_auth_agent)
     except (ValueError, OSError, RuntimeError, KeyError) as exc:
         print('Error: ' + str(exc), file=sys.stderr)
         return 1

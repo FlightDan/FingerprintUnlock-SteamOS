@@ -69,11 +69,11 @@ active=true;tick();await flush();await finish({result:'unavailable',reason:'devi
 // The SP window's Steam language selects one language only, with English fallback.
 for(const [query,expected] of [['schinese','zh'],['tchinese','zh'],['zh-CN','zh'],['zh-TW','zh'],['zh-Hant','zh'],['en-US','en'],['koreana','en'],['','en']]) assert.equal(module.fingerprintLanguage(query),expected);
 active=false;let panelEffect,statusRequests=0;DFL.findSP=()=>({document:doc,location:{search:'?LANGUAGE=schinese'}});
-window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect=()=>({callable:method=>method==='status'?async()=>{statusRequests++;return {available:true,enrolled:true}}:async()=>({})});
+window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect=()=>({callable:method=>method==='fingerprints'?async()=>{statusRequests++;return {result:'available',count:2,limit:6}}:async()=>({})});
 const chinesePlugin=module.default();SP_REACT.useEffect=fn=>{panelEffect=fn};
-const chinesePanel=JSON.stringify(chinesePlugin.content.type());assert.ok(chinesePanel.includes('指纹解锁'));assert.ok(chinesePanel.includes('桌面 → 系统设置'));assert.ok(!chinesePanel.includes('Fingerprint unlock'));assert.ok(!chinesePanel.includes('Test lock'));assert.ok(!chinesePanel.includes('Refresh'));
+const chinesePanel=JSON.stringify(chinesePlugin.content.type());assert.ok(chinesePanel.includes('指纹解锁'));assert.ok(chinesePanel.includes('添加指纹'));assert.ok(!chinesePanel.includes('Fingerprint unlock'));assert.ok(!chinesePanel.includes('Test lock'));assert.ok(!chinesePanel.includes('Refresh'));
 const dispose=panelEffect();await flush();assert.equal(statusRequests,1);dispose();chinesePlugin.onDismount();
-DFL.findSP=()=>({document:doc,location:{search:'?LANGUAGE=english'}});SP_REACT.useEffect=()=>{};const englishPlugin=module.default();const englishPanel=JSON.stringify(englishPlugin.content.type());assert.ok(englishPanel.includes('Fingerprint unlock'));assert.ok(englishPanel.includes('Desktop → System Settings'));assert.ok(!englishPanel.includes('指纹'));assert.ok(!englishPanel.includes('Test lock'));assert.ok(!englishPanel.includes('Refresh'));englishPlugin.onDismount();
+DFL.findSP=()=>({document:doc,location:{search:'?LANGUAGE=english'}});SP_REACT.useEffect=()=>{};const englishPlugin=module.default();const englishPanel=JSON.stringify(englishPlugin.content.type());assert.ok(englishPanel.includes('Fingerprint unlock'));assert.ok(englishPanel.includes('Add fingerprint'));assert.ok(!englishPanel.includes('指纹'));assert.ok(!englishPanel.includes('Test lock'));assert.ok(!englishPanel.includes('Refresh'));englishPlugin.onDismount();
 
 // Observed SharedJSContext document language takes precedence over navigator and SP URL.
 globalThis.document={documentElement:{lang:'zh-cn'}};Object.defineProperty(globalThis,'navigator',{value:{language:'en-US'},configurable:true});
@@ -82,51 +82,6 @@ globalThis.document.documentElement.lang='';DFL.findSP=()=>({document:doc,locati
 
 // Opening the panel while locked does not issue a status query.
 active=true;SP_REACT.useEffect=fn=>{panelEffect=fn};const lockedPanel=module.default();lockedPanel.content.type();const disposeLocked=panelEffect();await flush();assert.equal(statusRequests,1);disposeLocked();lockedPanel.onDismount();active=false;
-
-// Background repair refreshes an already-open panel and hides the manual action when ready.
-const previousUseState = SP_REACT.useState;
-const panelState = [];
-let stateIndex = 0;
-SP_REACT.useState = initial => {
-  const index = stateIndex++;
-  if (!(index in panelState)) panelState[index] = initial;
-  return [panelState[index], value => { panelState[index] = value; }];
-};
-let repairStatus = {available:false, busy:true, repairable:true};
-let repairRequests = 0;
-DFL.ButtonItem = 'ButtonItem';
-window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect = () => ({
-  callable: method => method === 'status' ? async () => repairStatus : async () => {
-    repairRequests++; return {ok:false,error:'failed to restore readonly state'};
-  }
-});
-const repairPlugin = module.default();
-const renderRepairTree = () => { stateIndex = 0; return repairPlugin.content.type(); };
-const renderRepairPanel = () => JSON.stringify(renderRepairTree());
-renderRepairPanel();
-const disposeRepair = panelEffect();
-await flush();
-assert.ok(renderRepairPanel().includes('检查中'));
-assert.ok(!renderRepairPanel().includes('重新安装指纹支持'));
-repairStatus = {available:false, repairable:true};
-await fire(2000);
-assert.ok(renderRepairPanel().includes('重新安装指纹支持'));
-const repairButton = renderRepairTree().children.at(-1).children[0];
-active = true;
-await repairButton.props.onClick();
-assert.equal(repairRequests, 0);
-active = false;
-await repairButton.props.onClick();
-assert.equal(repairRequests, 1);
-repairStatus = {available:true, enrolled:true};
-await fire(2000);
-assert.ok(renderRepairPanel().includes('已录入'));
-assert.ok(!renderRepairPanel().includes('ButtonItem'));
-assert.ok(renderRepairPanel().includes('失败'));
-assert.ok(![...timers.values()].some(timer => timer.ms === 2000));
-disposeRepair();
-repairPlugin.onDismount();
-SP_REACT.useState = previousUseState;
 
 // First use defaults on; explicit disable survives remount and invalid settings fail closed.
 let toggleProps;const savedCreate=SP_REACT.createElement;SP_REACT.createElement=(type,props,...children)=>{if(type==='Toggle')toggleProps=props;return savedCreate(type,props,...children)};
@@ -137,3 +92,85 @@ for(const value of ['invalid','', 'true']){settings.set('boiler.fingerprint.enab
 settings.set('boiler.fingerprint.enabled','1');const enabledPlugin=module.default();enabledPlugin.content.type();assert.equal(toggleProps.checked,true);enabledPlugin.onDismount();
 const savedStorage=globalThis.localStorage;globalThis.localStorage={getItem(){throw Error('denied')},setItem(){throw Error('denied')}};const deniedPlugin=module.default();deniedPlugin.content.type();assert.equal(toggleProps.checked,false);deniedPlugin.onDismount();
 globalThis.localStorage={getItem(){return null},setItem(){throw Error('denied')}};const writeDeniedPlugin=module.default();writeDeniedPlugin.content.type();assert.equal(toggleProps.checked,true);toggleProps.onChange(false);writeDeniedPlugin.content.type();assert.equal(toggleProps.checked,false);writeDeniedPlugin.onDismount();globalThis.localStorage=savedStorage;SP_REACT.createElement=savedCreate;
+
+assert.match(module.enrollmentPrompt({result:'sampling',samples:3},'en'), /3\/8.*center/);
+assert.match(module.enrollmentPrompt({result:'sampling',samples:4},'en'), /4\/8.*same finger/);
+assert.match(module.enrollmentPrompt({result:'sampling',samples:4},'zh'), /4\/8.*同一根手指/);
+assert.match(module.enrollmentPrompt({result:'identifying'},'en'), /authentication.*unenrolled/);
+assert.match(module.enrollmentPrompt({result:'retry',samples:4},'zh'), /4\/8.*再按一次/);
+assert.match(module.enrollmentPrompt({result:'unavailable',reason:'retry-timeout'},'zh'), /录入已结束/);
+// Exercise the list, the single add action, the limit, and cancellation on lock.
+{
+  let state = [], cursor = 0, lockActive = false, finishCancel, settleEnroll, verifyCount = 0, cancelCount = 0;
+  let effect, count = 0;
+  const oldReact = globalThis.SP_REACT, oldDFL = globalThis.DFL, oldWindow = globalThis.window;
+  globalThis.SP_REACT = {createElement:(type,props,...children)=>({type,props,children}),
+    useState:initial=>{const i=cursor++; if (!(i in state)) state[i]=initial; return [state[i], value=>{state[i]=value}];}, useEffect:fn=>{effect=fn}};
+  globalThis.DFL = {PanelSection:'section', PanelSectionRow:'row', Field:'field', ToggleField:'toggle', ButtonItem:'button'};
+  globalThis.localStorage = {getItem:()=> '1', setItem:()=>{}};
+  globalThis.window = {__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit:{connect:()=>({callable:method=>
+    method==='fingerprints'?async()=>({result:'available',count,limit:6}):
+    method==='enroll'?(...args)=>{assert.deepEqual(args,[]);return new Promise(r=>{settleEnroll=r})}:
+    method==='enroll_progress'?async()=>({result:'identifying'}):
+    method==='cancel'?()=>{cancelCount++;return new Promise(r=>{finishCancel=r})}:
+    method==='verify'?async()=>{verifyCount++;return {result:'unavailable'}}:async()=>({})})},
+    securitystore:{IsLockScreenActive:()=>lockActive}};
+  const instance=module.default();
+  const render=()=>{cursor=0;return instance.content.type()};
+  const nodes=(node,type)=>!node || typeof node!=='object'?[]:[...(node.type===type?[node]:[]),...(node.children||[]).flatMap(child=>nodes(child,type))];
+  render(); effect(); await flush();
+  assert.equal(nodes(render(),'field').length,0);
+  assert.equal(nodes(render(),'button').length,1);
+  count=6; effect(); await flush();
+  assert.equal(nodes(render(),'field').length,6);
+  assert.equal(nodes(render(),'button')[0].props.disabled,true);
+  count=2; effect(); await flush();
+  assert.equal(nodes(render(),'field').length,2);
+  nodes(render(),'button')[0].props.onClick(); await flush();
+  lockActive=true; tick(); await flush(); assert.equal(cancelCount,1); assert.equal(verifyCount,0);
+  finishCancel({}); await flush(); assert.equal(verifyCount,0);
+  settleEnroll({result:'cancelled'}); await flush(); assert.equal(verifyCount,1); instance.onDismount();
+  globalThis.SP_REACT=oldReact;globalThis.DFL=oldDFL;globalThis.window=oldWindow;
+}
+
+
+// Preserve automatic package recovery and only offer repair when the backend permits it.
+{
+  let state = [], cursor = 0, effect, inventoryCalls = 0, repairCalls = 0, locked = false;
+  let status = {available:false, busy:true, repairable:true};
+  let inventory = {result:'unavailable',reason:'list'};
+  const oldReact = globalThis.SP_REACT, oldDFL = globalThis.DFL, oldWindow = globalThis.window;
+  globalThis.SP_REACT = {createElement:(type,props,...children)=>({type,props,children}),
+    useState:initial=>{const i=cursor++; if (!(i in state)) state[i]=initial; return [state[i], value=>{state[i]=value}];}, useEffect:fn=>{effect=fn}};
+  globalThis.DFL = {PanelSection:'section', PanelSectionRow:'row', Field:'field', ToggleField:'toggle', ButtonItem:'button', findSP:()=>({location:{search:'?LANGUAGE=schinese'}})};
+  globalThis.window = {__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit:{connect:()=>({callable:method=>
+    method==='fingerprints'?async()=>{inventoryCalls++; return inventory}:
+    method==='status'?async()=>status:
+    method==='repair'?async()=>{repairCalls++;return {ok:true}}:async()=>({})})},
+    securitystore:{IsLockScreenActive:()=>locked}};
+  const instance=module.default();
+  const render=()=>{cursor=0;return instance.content.type()};
+  const nodes=(node,type)=>!node || typeof node!=='object'?[]:[...(node.type===type?[node]:[]),...(node.children||[]).flatMap(child=>nodes(child,type))];
+  const repair=()=>nodes(render(),'button').find(node=>node.children.includes('重新安装指纹支持'));
+  render(); const dispose=effect(); await flush();
+  assert.equal(inventoryCalls,1); assert.equal(repair(),undefined);
+  status={available:false,repairable:true}; await fire(2000);
+  assert.ok(repair());
+  locked=true; await repair().props.onClick(); assert.equal(repairCalls,0);
+  locked=false; await repair().props.onClick(); assert.equal(repairCalls,1);
+  status={available:true,enrolled:true,repairable:false}; inventory={result:'available',count:2,limit:6};
+  await fire(2000); assert.equal(inventoryCalls,2); assert.equal(nodes(render(),'field').length,2); assert.equal(repair(),undefined);
+  dispose(); instance.onDismount();
+  globalThis.SP_REACT=oldReact;globalThis.DFL=oldDFL;globalThis.window=oldWindow;
+}
+// A Boiler-managed reader cannot expose the stock-package repair action.
+{
+  let state=[], cursor=0, effect;
+  const oldReact=globalThis.SP_REACT, oldDFL=globalThis.DFL, oldWindow=globalThis.window;
+  globalThis.SP_REACT={createElement:(type,props,...children)=>({type,props,children}),useState:initial=>{const i=cursor++;if(!(i in state))state[i]=initial;return [state[i],v=>{state[i]=v}]},useEffect:fn=>{effect=fn}};
+  globalThis.DFL={PanelSection:'section',PanelSectionRow:'row',Field:'field',ToggleField:'toggle',ButtonItem:'button',findSP:()=>({location:{search:'?LANGUAGE=schinese'}})};
+  globalThis.window={__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit:{connect:()=>({callable:method=>method==='fingerprints'?async()=>({result:'available',count:3,limit:6}):method==='status'?async()=>({available:true,repairable:false}):async()=>({})})},securitystore:{IsLockScreenActive:()=>false}};
+  const instance=module.default(), render=()=>{cursor=0;return instance.content.type()};
+  render(); const dispose=effect(); await flush(); assert.ok(!JSON.stringify(render()).includes('重新安装指纹支持'));
+  dispose();instance.onDismount();globalThis.SP_REACT=oldReact;globalThis.DFL=oldDFL;globalThis.window=oldWindow;
+}
