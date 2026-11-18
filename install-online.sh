@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-COMMIT=367ce9fadac3b03b330a4a8179c1493a3f72ecfc
+COMMIT=ddd219807747b31da8f1cde0337d3683acbdffdd
 REPOSITORY=https://github.com/FlightDan/FingerprintUnlock-SteamOS.git
 
 if [ "$(id -u)" -eq 0 ]; then
