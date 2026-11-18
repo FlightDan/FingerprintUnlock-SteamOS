@@ -45,6 +45,7 @@ class Plugin:
         self.proc = None
         self.cancelled = False
         self.enroll_state = None
+        self.enroll_profile = {'total': None, 'guided': False, 'scan_type': 'unknown'}
         self.enroll_unit = None
         self.package_lock = asyncio.Lock()
         self.repairing = False
@@ -199,8 +200,13 @@ class Plugin:
                 'net.reactivated.Fprint.Device')
         ncode, name = await self._user_capture(*args, 'name')
         scode, stages = await self._user_capture(*args, 'num-enroll-stages')
-        device_name = 'FocalTech FTE3600 (host BRISK)'
-        if ncode != 0 or scode != 0 or name.strip() != 's "' + device_name + '"' or stages.strip() != 'i 9':
+        name_match = re.fullmatch(r's "([^"\r\n]+)"\s*', name)
+        stage_match = re.fullmatch(r'i (-?\d+)\s*', stages)
+        if ncode != 0 or scode != 0 or not name_match or not stage_match:
+            return None
+        device_name = name_match.group(1)
+        stage_count = int(stage_match.group(1))
+        if stage_count == 0 or stage_count < -1:
             return None
         account = self._account()
         code, listed = await self._user_capture('/usr/bin/systemd-run', '--user', '--quiet', '--pipe', '--wait', '--collect',
@@ -209,10 +215,13 @@ class Plugin:
         if code != 0 or lines[:3] != ['found 1 devices', 'Device at ' + path, 'Using device ' + path]:
             return None
         empty = 'User ' + account.pw_name + ' has no fingers enrolled for ' + device_name + '.'
-        header = 'Fingerprints for user ' + account.pw_name + ' on ' + device_name + ' (press):'
+        header = 'Fingerprints for user ' + account.pw_name + ' on ' + device_name + ' ('
         if lines[3:] == [empty]:
             entries = []
-        elif len(lines) > 4 and lines[3] == header:
+            tcode, scan = await self._user_capture(*args, 'scan-type')
+            scan_type = {'s "press"': 'press', 's "swipe"': 'swipe'}.get(scan.strip(), 'unknown') if tcode == 0 else 'unknown'
+        elif len(lines) > 4 and lines[3] in (header + 'press):', header + 'swipe):'):
+            scan_type = 'press' if lines[3] == header + 'press):' else 'swipe'
             entries = []
             for index, line in enumerate(lines[4:]):
                 match = re.fullmatch(r' - #' + str(index) + r': ((?:right|left)-(?:thumb|(?:index|middle|ring|little)-finger))', line)
@@ -221,6 +230,11 @@ class Plugin:
                 entries.append(match.group(1))
         else:
             return None
+        # The BRISK backend's nine stages include fprintd's duplicate check.
+        guided = device_name == 'FocalTech FTE3600 (host BRISK)' and stage_count in (-1, 9)
+        self.enroll_profile = {'total': 8 if guided else (stage_count if stage_count > 0 else None),
+                               'guided': guided, 'scan_type': scan_type}
+
         return entries
 
     async def fingerprints(self):
@@ -313,6 +327,7 @@ class Plugin:
             unit = None
             auth_focus = None
             try:
+                self.enroll_profile = {'total': None, 'guided': False, 'scan_type': 'unknown'}
                 entries = await self._list_fingerprints()
                 if self.cancelled:
                     return {'result': 'cancelled'}
@@ -331,7 +346,8 @@ class Plugin:
                     return {'result': 'unavailable', 'reason': 'agent'}
                 if self.cancelled:
                     return {'result': 'cancelled'}
-                self.enroll_state = {'result': 'identifying', 'samples': 0}
+                profile = self.enroll_profile
+                self.enroll_state = {'result': 'identifying', 'samples': 0, **profile}
                 unit = 'boiler-fingerprint-enroll-' + uuid.uuid4().hex + '.service'
                 self.enroll_unit = unit
                 self.proc = await self._user_process('/usr/bin/systemd-run', '--user', '--pipe', '--wait', '--collect',
@@ -374,22 +390,22 @@ class Plugin:
                             return 'capture'
                         if event == 'enroll-stage-passed':
                             retry_deadline = None
-                            if not identified:
+                            if profile['guided'] and not identified:
                                 identified = True
-                            elif samples < 7:
+                            elif not profile['guided'] or samples < 7:
                                 samples += 1
                             else:
                                 return 'capture'
-                            self.enroll_state = {'result': 'sampling', 'samples': samples}
+                            self.enroll_state = {'result': 'sampling', 'samples': samples, **profile}
                         elif event == 'enroll-completed':
-                            complete = identified and samples == 7
+                            complete = not profile['guided'] or (identified and samples == 7)
                             if not complete:
                                 return 'capture'
-                            samples = 8
+                            samples = 8 if profile['guided'] else samples + 1
                             retry_deadline = None
-                            self.enroll_state = {'result': 'sampling', 'samples': samples}
+                            self.enroll_state = {'result': 'sampling', 'samples': samples, **profile}
                         elif event in ('enroll-retry-scan', 'enroll-swipe-too-short', 'enroll-finger-not-centered', 'enroll-remove-and-retry', 'enroll-too-fast'):
-                            self.enroll_state = {'result': 'retry', 'samples': samples}
+                            self.enroll_state = {'result': 'retry', 'samples': samples, **profile}
                             retry_deadline = clock() + ENROLL_RETRY_TIMEOUT_SECONDS
                         elif event == 'enroll-duplicate':
                             return 'duplicate'
@@ -403,7 +419,7 @@ class Plugin:
                 if self.cancelled:
                     return {'result': 'cancelled'}
                 if reason is None:
-                    return {'result': 'complete', 'samples': 8}
+                    return {'result': 'complete', 'samples': self.enroll_state['samples'], **profile}
                 return {'result': 'unavailable', 'reason': reason, 'samples': self.enroll_state.get('samples', 0)}
             except (OSError, ValueError, KeyError, asyncio.TimeoutError):
                 return {'result': 'cancelled'} if self.cancelled else {'result': 'unavailable', 'reason': 'session'}

@@ -41,3 +41,17 @@ recorded finger and SteamOS package recovery from KevinX8. See the
 [FT9365 provider and build scope](native/ft9365-release.md). The platform bound
 native downloads are independent of the standalone Decky ZIP and the
 Boiler installer and maintenance release.
+
+## v0.1.10 unified installer and generic fprintd enrollment
+
+The standard `install.sh` and Decky ZIP now use the same plugin files and
+fprintd configuration. The plugin queries the configured fprintd reader for
+its inventory and progress. Enrollment follows the reader's reported scan
+style, stages and completion. The eight-sample grip-change guide is retained
+for the tested FTE3600 BRISK profile. Retry timeout and cancellation apply to
+all supported enrollment sessions.
+
+The complete installer source contains the FT9365 driver patch. Physical lift
+is part of the installed driver's capture implementation. The standalone
+installer preserves the installed fprintd provider and its existing library.
+Boiler-managed systems continue to use their provider maintenance path.

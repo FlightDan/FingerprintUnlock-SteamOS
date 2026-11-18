@@ -15,8 +15,14 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 FOLDER = 'boiler-fingerprint-unlock'
 MARKER = '.boiler-fingerprint-standalone.json'
+STOCK_BIN_DIR = '/usr/bin'
+STOCK_COMMANDS = {name: STOCK_BIN_DIR + '/' + name for name in ('fprintd-verify', 'fprintd-list', 'fprintd-enroll')}
 FILES = {'main.py': 'bridge/main.py', 'dist/index.js': 'bridge/index.js',
          'plugin.json': 'bridge/plugin.json', 'package.json': 'bridge/package.json'}
+
+
+def command_profile(binaries):
+    return {name.removeprefix('fprintd-') + '_command': path for name, path in binaries.items()}
 
 
 def sha(data):
@@ -69,12 +75,15 @@ def preflight(home, bin_dir, require_binaries=True):
     if 'oxp3 managed offline decky' in unit.stdout.lower() or '/var/lib/oxp3-installer/decky' in unit.stdout.lower() or '/var/lib/oxp3-installer/decky' in str(home.resolve()).lower():
         raise ValueError('Boiler-managed OXP3 Decky must be managed through Boiler maintenance')
     binaries = {}
-    for name in (('fprintd-verify', 'fprintd-list', 'fprintd-enroll') if require_binaries else ()):
+    for name in (STOCK_COMMANDS if require_binaries else ()):
         path = Path(bin_dir) / name
         try:
             binaries[name] = trusted_executable(path)
         except FileNotFoundError as exc:
-            raise ValueError('Required executable missing: ' + str(path)) from exc
+            if Path(bin_dir) != Path(STOCK_BIN_DIR) or os.path.lexists(path):
+                raise ValueError('Required executable missing: ' + str(path)) from exc
+            # The standard profile also works with Decky's existing signed package recovery.
+            binaries[name] = STOCK_COMMANDS[name]
     return plugins, binaries
 
 
@@ -123,20 +132,19 @@ def run(action, home, bin_dir, game_mode_auth_agent=None):
                 continue
     if action == 'check':
         if old is None:
-            print('Decky and fprintd commands found; plugin is not installed')
+            print('Decky is ready; plugin is not installed')
             return
         changed = [name for name, digest in old.items() if not regular(target / name) or sha((target / name).read_bytes()) != digest]
         if changed:
             raise ValueError('Installed files missing or changed: ' + ', '.join(changed))
-        print('Decky, fprintd commands and standalone plugin inventory checked')
+        print('Decky, fprintd configuration and standalone plugin inventory checked')
         return
     if action == 'uninstall' and old is None:
         raise ValueError('Standalone plugin is not installed')
     payload = {}
     if action == 'install':
         payload = {name: (ROOT / src).read_bytes() for name, src in FILES.items()}
-        profile = {'verify_command': binaries['fprintd-verify'], 'list_command': binaries['fprintd-list'],
-                   'enroll_command': binaries['fprintd-enroll']}
+        profile = command_profile(binaries)
         if game_mode_auth_agent:
             profile['game_mode_auth_agent'] = trusted_executable(game_mode_auth_agent)
         payload['profile.json'] = (json.dumps(profile, indent=2) + '\n').encode()
@@ -228,7 +236,7 @@ def main():
     parser.add_argument('action', nargs='?', choices=('install', 'check', 'uninstall', 'kde-pam'),
                         default='install')
     parser.add_argument('--decky-home', help='existing Decky homebrew directory')
-    parser.add_argument('--fprintd-bin', default='/usr/bin', help='directory containing fprintd CLI programs')
+    parser.add_argument('--fprintd-bin', default=STOCK_BIN_DIR, help='directory containing fprintd CLI programs')
     parser.add_argument('--game-mode-auth-agent', help='install action: trusted KDE agent built with the Game Mode keyboard patch')
     parser.add_argument('--kde-pam-package',
                         help='kde-pam action: fprintd package archive providing usr/lib/security/pam_fprintd.so')

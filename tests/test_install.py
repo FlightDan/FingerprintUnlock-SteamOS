@@ -107,6 +107,14 @@ class InstallTests(unittest.TestCase):
         profile = json.loads((self.target / 'profile.json').read_text())
         self.assertEqual(profile['game_mode_auth_agent'], str(agent.resolve()))
 
+    def test_standard_install_uses_zip_profile_when_stock_tools_are_missing(self):
+        with patch.object(installer, 'trusted_executable', side_effect=FileNotFoundError):
+            installer.run('install', self.home, installer.STOCK_BIN_DIR)
+        profile = json.loads((self.target / 'profile.json').read_text())
+        self.assertEqual(profile, {'verify_command': '/usr/bin/fprintd-verify',
+                                   'list_command': '/usr/bin/fprintd-list',
+                                   'enroll_command': '/usr/bin/fprintd-enroll'})
+
     def test_missing_cli_prevents_mutation(self):
         (self.bin / 'fprintd-list').unlink()
         with self.assertRaisesRegex(ValueError, 'Required executable'):

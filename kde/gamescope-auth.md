@@ -34,5 +34,4 @@ managed by the administrator who supplies the option. Uninstalling the plugin
 removes its configuration entry.
 
 The KDE authorization agent patch is licensed under
-[GPL-2.0-or-later](COPYING-GPL-2.0). The paired native source archive retains
-KDE’s original notices.
+[GPL-2.0-or-later](COPYING-GPL-2.0). The pinned KDE source retains the original notices.

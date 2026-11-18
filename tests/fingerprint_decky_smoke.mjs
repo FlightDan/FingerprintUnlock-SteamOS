@@ -93,12 +93,17 @@ settings.set('boiler.fingerprint.enabled','1');const enabledPlugin=module.defaul
 const savedStorage=globalThis.localStorage;globalThis.localStorage={getItem(){throw Error('denied')},setItem(){throw Error('denied')}};const deniedPlugin=module.default();deniedPlugin.content.type();assert.equal(toggleProps.checked,false);deniedPlugin.onDismount();
 globalThis.localStorage={getItem(){return null},setItem(){throw Error('denied')}};const writeDeniedPlugin=module.default();writeDeniedPlugin.content.type();assert.equal(toggleProps.checked,true);toggleProps.onChange(false);writeDeniedPlugin.content.type();assert.equal(toggleProps.checked,false);writeDeniedPlugin.onDismount();globalThis.localStorage=savedStorage;SP_REACT.createElement=savedCreate;
 
-assert.match(module.enrollmentPrompt({result:'sampling',samples:3},'en'), /3\/8.*center/);
-assert.match(module.enrollmentPrompt({result:'sampling',samples:4},'en'), /4\/8.*same finger/);
-assert.match(module.enrollmentPrompt({result:'sampling',samples:4},'zh'), /4\/8.*同一根手指/);
+assert.match(module.enrollmentPrompt({result:'sampling',samples:3,total:8,guided:true,scan_type:'press'},'en'), /3\/8.*center/);
+assert.match(module.enrollmentPrompt({result:'sampling',samples:4,total:8,guided:true,scan_type:'press'},'en'), /4\/8.*same finger/);
+assert.match(module.enrollmentPrompt({result:'sampling',samples:4,total:8,guided:true,scan_type:'press'},'zh'), /4\/8.*同一根手指/);
 assert.match(module.enrollmentPrompt({result:'identifying'},'en'), /authentication.*unenrolled/);
-assert.match(module.enrollmentPrompt({result:'retry',samples:4},'zh'), /4\/8.*再按一次/);
+assert.match(module.enrollmentPrompt({result:'retry',samples:4,total:8,guided:true,scan_type:'press'},'zh'), /4\/8.*再按一次/);
 assert.match(module.enrollmentPrompt({result:'unavailable',reason:'retry-timeout'},'zh'), /录入已结束/);
+assert.match(module.enrollmentPrompt({result:'sampling',samples:1,total:3,guided:false,scan_type:'press'},'zh'), /1\/3.*轻触/);
+assert.match(module.enrollmentPrompt({result:'sampling',samples:1,total:3,guided:false,scan_type:'swipe'},'zh'), /1\/3.*划过/);
+assert.match(module.enrollmentPrompt({result:'retry',samples:1,total:3,guided:false,scan_type:'swipe'},'zh'), /1\/3.*划过/);
+assert.equal(module.enrollmentPrompt({result:'sampling',samples:0,total:null,guided:false,scan_type:'unknown'},'zh'), '请再次采集同一根手指。');
+assert.equal(module.enrollmentPrompt({result:'retry',samples:0,total:null,guided:false,scan_type:'unknown'},'zh'), '这次采样未通过，请再次采集同一根手指。');
 // Exercise the list, the single add action, the limit, and cancellation on lock.
 {
   let state = [], cursor = 0, lockActive = false, finishCancel, settleEnroll, verifyCount = 0, cancelCount = 0;

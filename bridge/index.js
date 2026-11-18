@@ -86,10 +86,15 @@ const panelText = {
   en: {
     title: 'Fingerprint', toggle: 'Fingerprint unlock', description: 'Experimental',
     list: 'Fingerprints', add: 'Add fingerprint', print: 'Fingerprint', cancel: 'Cancel',
-    identifying: 'Complete system authentication, then touch the sensor with an unenrolled finger.',
+    identifying: 'Complete system authentication, then scan an unenrolled finger.',
     center: 'Touch the center of your finger. Lift and touch again.',
     edge: 'Lightly touch with the same finger. Lift and touch again.',
     edgeTitle: 'Change your grip: scan the fingertip edge',
+    press: 'Touch the sensor with the same finger. Lift and touch again.',
+    swipe: 'Swipe the same finger across the sensor again.',
+    scan: 'Scan the same finger again.',
+    retrySwipe: 'Scan could not be used. Swipe the same finger again.',
+    retryScan: 'Scan could not be used. Scan the same finger again.',
     retry: 'Scan could not be used. Lift, shift slightly, and touch again.', complete: 'Fingerprint added.',
     starting: 'Starting enrollment…', busy: 'The reader is busy. Try again.',
     full: 'Fingerprint limit reached (6).', failed: 'Enrollment stopped. Try again.',
@@ -107,10 +112,15 @@ const panelText = {
   zh: {
     title: '指纹', toggle: '指纹解锁', description: '实验功能',
     list: '指纹列表', add: '添加指纹', print: '指纹', cancel: '取消',
-    identifying: '请完成系统身份验证，再用尚未录入的手指轻触传感器。',
+    identifying: '请完成系统身份验证，再采集尚未录入的手指。',
     center: '轻触指腹中央，抬起后再轻触。',
     edge: '用同一根手指轻触，抬起后再轻触。',
     edgeTitle: '换个握姿，采集指尖边缘',
+    press: '用同一根手指轻触传感器，抬起后再轻触。',
+    swipe: '用同一根手指再次划过传感器。',
+    scan: '请再次采集同一根手指。',
+    retrySwipe: '这次采样未通过，请用同一根手指再次划过传感器。',
+    retryScan: '这次采样未通过，请再次采集同一根手指。',
     retry: '这次采样未通过。抬起手指，稍换位置再按一次。', complete: '指纹已添加。',
     starting: '正在开始录入…', busy: '指纹识别器正忙，请重试。',
     full: '已达到 6 枚指纹的上限。', failed: '录入已中断，请重试。',
@@ -130,10 +140,19 @@ const panelText = {
 export function enrollmentPrompt(state, language) {
   if (!state || state.result === 'cancelled') return '';
   const text = panelText[language === 'zh' ? 'zh' : 'en'];
-  if (state.result === 'sampling') {
-    return state.samples + '/8 · ' + (state.samples < 4 ? text.center : text.edge);
+  if (state.result === 'sampling' || state.result === 'retry') {
+    const progress = Number.isInteger(state.total) && state.total > 0
+      ? state.samples + '/' + state.total + ' · ' : '';
+    if (state.result === 'retry') {
+      const instruction = state.scan_type === 'swipe' ? text.retrySwipe
+        : state.scan_type === 'press' ? text.retry : text.retryScan;
+      return progress + instruction;
+    }
+    if (state.guided) return progress + (state.samples < 4 ? text.center : text.edge);
+    const instruction = state.scan_type === 'swipe' ? text.swipe
+      : state.scan_type === 'press' ? text.press : text.scan;
+    return progress + instruction;
   }
-  if (state.result === 'retry') return state.samples + '/8 · ' + text.retry;
   if (state.result === 'unavailable') return text.errors[state.reason] || text.failed;
   return text[state.result] || '';
 }
@@ -335,7 +354,8 @@ function Content() {
   const count = inventory?.result === 'available' ? inventory.count : 0;
   const limit = inventory?.limit ?? 6;
   const full = count >= limit;
-  const edgePhase = ['sampling', 'retry'].includes(enrollment?.result) && enrollment.samples >= 4 && enrollment.samples < 8;
+  const edgePhase = enrollment?.guided && ['sampling', 'retry'].includes(enrollment.result)
+    && enrollment.samples >= 4 && enrollment.samples < enrollment.total;
   const message = enrollmentPrompt(enrollment, language)
     || (full ? text.full : enrollmentPrompt(inventory, language));
   const list = h(DFL.PanelSection, {title:text.list},

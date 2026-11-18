@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Build a Decky "install from zip" archive: python3 scripts/build_zip.py [out.zip]"""
+import importlib.util
 import json
 from pathlib import Path
 import sys
 import zipfile
 
-ROOT = Path(__file__).resolve().parents[1]
-FOLDER = 'boiler-fingerprint-unlock'
-FILES = {'main.py': 'bridge/main.py', 'dist/index.js': 'bridge/index.js', 'plugin.json': 'bridge/plugin.json',
-         'package.json': 'bridge/package.json', 'LICENSE': 'COPYING', 'LICENSE-upstream': 'upstream/LICENSE'}
-PROFILE = {'verify_command': '/usr/bin/fprintd-verify', 'list_command': '/usr/bin/fprintd-list',
-           'enroll_command': '/usr/bin/fprintd-enroll'}
+spec = importlib.util.spec_from_file_location('standalone_installer', Path(__file__).with_name('install.py'))
+installer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(installer)
+ROOT, FOLDER = installer.ROOT, installer.FOLDER
+FILES = {**installer.FILES, 'LICENSE': 'COPYING', 'LICENSE-upstream': 'upstream/LICENSE'}
+PROFILE = installer.command_profile(installer.STOCK_COMMANDS)
 
 out = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / (FOLDER + '.zip'))
 with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:

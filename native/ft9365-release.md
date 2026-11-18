@@ -8,12 +8,14 @@ that wait after a rejected frame. Decky handles instructions, the eight-sample
 progress, the edge prompt and the retry timeout. The existing template format
 is shared with the previous driver.
 
-The X2 Mini native release download contains the library and the KDE agent used
-for the SteamOS 3.10 x86-64 test. The library uses the existing FTE3600 kernel
-glue, fprintd service and OpenCV 4.6 runtime libraries with `.so.406` SONAMEs.
-The KDE agent requires Qt and Qt Virtual Keyboard 6.11.1 and KDE Frameworks
-6.28.0. The driver library, the authorization agent and their build sources are
-available as separate release assets from the Decky plugin.
+The standard `install.sh` and Decky ZIP use the system fprintd interface and
+work with the reader and library already installed. The FT9365 patch is part
+of the source distribution. FT9365 users get the physical lift check when
+their installed driver includes that patch.
+
+The X2 Mini hardware test used SteamOS 3.10 x86-64, the existing FTE3600 kernel
+glue and fprintd service, and OpenCV 4.6 runtime libraries with `.so.406`
+SONAMEs. Qt 6.11.1 and KDE Frameworks 6.28.0 were used for the optional keyboard.
 
 For an independently managed SteamOS system, build the patch into the matching
 libfprint package and use that package's installation and rollback procedures.
@@ -24,4 +26,4 @@ persistent installation. The hardware acceptance used a current-boot overlay
 on the managed X2 Mini fingerprint service and Decky plugin.
 
 The native patch is licensed under [LGPL-2.1-or-later](COPYING-LGPL-2.1).
-The paired source archive keeps the upstream licenses and attributions.
+The source links identify the upstream licenses and attributions.
