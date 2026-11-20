@@ -264,6 +264,23 @@ class Plugin:
         display = displays[0]
         owner = ('/usr/bin/busctl', '--user', '--no-pager', 'status', AUTH_AGENT_NAME)
         code, status = await self._user_capture(*owner)
+        if code == 0 and self.game_mode_auth_agent:
+            # Replace only our own stale transient agent after an upgrade.
+            pid = re.search(r'^PID=([1-9][0-9]*)$', status, re.M)
+            unit = 'boiler-fingerprint-gamemode-auth.service'
+            ucode, main_pid = await self._user_capture('/usr/bin/systemctl', '--user', 'show', unit,
+                                                       '--property=MainPID', '--value')
+            if pid and ucode == 0 and main_pid.strip() == pid.group(1):
+                ecode, executable = await self._user_capture('/usr/bin/readlink', '-f',
+                                                              '/proc/' + pid.group(1) + '/exe')
+                if ecode != 0:
+                    return False
+                if executable.strip() != self.game_mode_auth_agent:
+                    if not await self._stop_unit(unit):
+                        return False
+                    code, status = await self._user_capture(*owner)
+                    if code == 0:
+                        return False
         if code != 0:
             # Start the KDE agent as the Steam user on Gamescope's active display.
             agent = self.game_mode_auth_agent or STOCK_AUTH_AGENT
