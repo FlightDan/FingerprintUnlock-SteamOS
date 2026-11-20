@@ -18,7 +18,7 @@ cat > "$ROOT/bin/git" <<'EOF'
 printf '%s\n' "$*" >> "$ROOT/git.log"
 case " $* " in
   *' fetch '*) [ "${MOCK_FETCH_FAIL:-0}" = 0 ] || exit 1 ;;
-  *' rev-parse '*) printf '%s\n' "${MOCK_COMMIT:-452ac7308c483808574d2d984e92b73625d6bf85}" ;;
+  *' rev-parse '*) printf '%s\n' "${MOCK_COMMIT:-abeb115e14fd33236e46342169ff5e54f1933127}" ;;
 esac
 EOF
 cat > "$ROOT/bin/sudo" <<'EOF'
@@ -37,7 +37,7 @@ test "$(sed -n '3p' "$ROOT/sudo.log")" = --fprintd-bin
 test "$(sed -n '4p' "$ROOT/sudo.log")" = '/path with spaces'
 test "$(sed -n '5p' "$ROOT/sudo.log")" = 'literal $value'
 test -z "$(ls -A "$ROOT/tmp")"
-grep -q 'fetch -q --depth 1 https://github.com/FlightDan/FingerprintUnlock-SteamOS.git 452ac7308c483808574d2d984e92b73625d6bf85' "$ROOT/git.log"
+grep -q 'fetch -q --depth 1 https://github.com/FlightDan/FingerprintUnlock-SteamOS.git abeb115e14fd33236e46342169ff5e54f1933127' "$ROOT/git.log"
 
 rm "$ROOT/sudo.log"
 if MOCK_COMMIT=0000000000000000000000000000000000000000 sh "$SCRIPT" 2>"$ROOT/error.log"; then
