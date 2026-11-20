@@ -170,7 +170,7 @@ class EnrollmentTests(unittest.IsolatedAsyncioTestCase):
         p = self.plugin()
         p.game_mode_auth_agent = '/opt/boiler/polkit-kde-authentication-agent-1'
         p._user_capture = AsyncMock(side_effect=[(0, ''), (0, 'DISPLAY=:3\n'),
-            (0, 'PID=448\n'), (0, '448\n'), (0, '/usr/lib/polkit-kde-authentication-agent-1\n'),
+            (0, 'PID=448\n'), (0, 'MainPID=448\nExecStart={ path=/usr/lib/polkit-kde-authentication-agent-1 ; argv[]=agent }\n'),
             (1, ''), (0, ''), (0, 'PID=449\n')])
         p._stop_unit = AsyncMock(return_value=True)
         self.assertEqual(await p._prepare_game_mode_auth(), (':3', '449'))
@@ -181,7 +181,7 @@ class EnrollmentTests(unittest.IsolatedAsyncioTestCase):
         p = self.plugin()
         p.game_mode_auth_agent = '/opt/boiler/polkit-kde-authentication-agent-1'
         p._user_capture = AsyncMock(side_effect=[(0, ''), (0, 'DISPLAY=:3\n'),
-                                                  (0, 'PID=448\n'), (0, '999\n')])
+                                                  (0, 'PID=448\n'), (0, 'MainPID=999\n')])
         p._stop_unit = AsyncMock()
         self.assertEqual(await p._prepare_game_mode_auth(), (':3', '448'))
         p._stop_unit.assert_not_awaited()
@@ -190,9 +190,29 @@ class EnrollmentTests(unittest.IsolatedAsyncioTestCase):
         p = self.plugin()
         p.game_mode_auth_agent = '/opt/boiler/polkit-kde-authentication-agent-1'
         p._user_capture = AsyncMock(side_effect=[(0, ''), (0, 'DISPLAY=:3\n'),
-            (0, 'PID=448\n'), (0, '448\n'), (0, '/usr/lib/polkit-kde-authentication-agent-1\n')])
+            (0, 'PID=448\n'), (0, 'MainPID=448\nExecStart={ path=/usr/lib/polkit-kde-authentication-agent-1 ; argv[]=agent }\n')])
         p._stop_unit = AsyncMock(return_value=False)
         self.assertFalse(await p._prepare_game_mode_auth())
+    async def test_keyboard_agent_failure_falls_back_after_cleanup(self):
+        p = self.plugin()
+        p.game_mode_auth_agent = '/opt/boiler/keyboard-agent'
+        p._user_capture = AsyncMock(side_effect=[(0, ''), (0, 'DISPLAY=:3\n'), (1, ''),
+            (1, 'failed'), (1, ''), (0, ''), (0, 'PID=449\n')])
+        p._stop_unit = AsyncMock(return_value=True)
+        self.assertEqual(await p._prepare_game_mode_auth(), (':3', '449'))
+        p._stop_unit.assert_awaited_once_with('boiler-fingerprint-gamemode-auth.service')
+        args = p._user_capture.await_args_list[-2].args
+        self.assertEqual(args[-1], bridge.STOCK_AUTH_AGENT)
+        self.assertNotIn('--setenv=QT_IM_MODULE=qtvirtualkeyboard', args)
+
+    async def test_keyboard_agent_failure_preserves_new_owner(self):
+        p = self.plugin()
+        p.game_mode_auth_agent = '/opt/boiler/keyboard-agent'
+        p._user_capture = AsyncMock(side_effect=[(0, ''), (0, 'DISPLAY=:3\n'), (1, ''),
+                                                  (1, 'failed'), (0, 'PID=500\n')])
+        p._stop_unit = AsyncMock(return_value=True)
+        self.assertFalse(await p._prepare_game_mode_auth())
+        self.assertEqual(p._user_capture.await_count, 5)
     async def test_game_mode_positions_and_focuses_only_agent_window(self):
         p = self.plugin()
         p.enroll_state = {'result': 'identifying', 'samples': 0}
