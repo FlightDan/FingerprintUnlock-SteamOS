@@ -55,3 +55,7 @@ The complete installer source contains the FT9365 driver patch. Physical lift
 is part of the installed driver's capture implementation. The standalone
 installer preserves the installed fprintd provider and its existing library.
 Boiler-managed systems continue to use their provider maintenance path.
+
+## v0.1.11 Game Mode keyboard
+
+The standalone sudo installer selects the reviewed KDE agent on the tested SteamOS, Qt and KDE package baseline. It installs a separate root-owned copy; the stock agent and authentication policy are unchanged. The Decky-only ZIP retains the stock profile. Other runtimes may use the existing explicit trusted-agent option. Existing managed Game Mode units are replaced only when their executable differs from the configured agent. A packaged OP3 end-to-end check remains required.

@@ -21,6 +21,62 @@ FILES = {'main.py': 'bridge/main.py', 'dist/index.js': 'bridge/index.js',
          'plugin.json': 'bridge/plugin.json', 'package.json': 'bridge/package.json'}
 
 
+# Immutable, reviewed build for the verified SteamOS ABI. Never replace the system agent.
+BUNDLED_AGENT = ROOT / 'kde/polkit-kde-authentication-agent-1-6.7.3'
+BUNDLED_AGENT_SHA256 = '959ef59018df7696a101479276b817faee5066d61eaae9b1ae51fa8776417d5f'
+AGENT_DIR = Path('/var/lib/boiler-fingerprint-standalone')
+AGENT_NAME = 'polkit-kde-authentication-agent-1-' + BUNDLED_AGENT_SHA256
+
+
+def supported_keyboard_runtime():
+    """Select only the tested SteamOS and Qt/KDE runtime, with the keyboard installed."""
+    try:
+        release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
+                       if '=' in line and not line.startswith('#'))
+        release = {k: v.strip('"\'') for k, v in release.items()}
+        if release.get('ID') != 'steamos' or release.get('VERSION_ID') != '3.10':
+            return False
+        packages = command('/usr/bin/pacman', '-Q', 'qt6-base', 'qt6-declarative', 'qt6-virtualkeyboard', 'polkit-kde-agent', 'kcoreaddons', 'kdbusaddons', 'kirigami')
+        if packages.returncode:
+            return False
+        versions = dict(line.split(None, 1) for line in packages.stdout.splitlines())
+        return (versions.get('qt6-base', '').split('-')[0] == '6.11.1'
+                and versions.get('kcoreaddons', '').split('-')[0] == '6.28.0'
+                and versions.get('qt6-virtualkeyboard', '').split('-')[0] == '6.11.1'
+                and versions.get('qt6-declarative', '').split('-')[0] == '6.11.1'
+                and versions.get('polkit-kde-agent', '').split('-')[0] == '6.7.3'
+                and versions.get('kdbusaddons', '').split('-')[0] == '6.28.0'
+                and versions.get('kirigami', '').split('-')[0] == '6.28.0')
+    except (OSError, ValueError):
+        return False
+
+
+def install_bundled_agent():
+    data = BUNDLED_AGENT.read_bytes()
+    if sha(data) != BUNDLED_AGENT_SHA256:
+        raise ValueError('Bundled keyboard agent failed checksum verification')
+    AGENT_DIR.mkdir(mode=0o755, exist_ok=True)
+    # Validate the directory and its ancestors before writing any executable.
+    for directory in (AGENT_DIR, *AGENT_DIR.parents):
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('Keyboard agent directory must be root-owned and not writable by others')
+    target = AGENT_DIR / AGENT_NAME
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o755)
+    except FileExistsError:
+        if sha(Path(trusted_executable(target)).read_bytes()) != BUNDLED_AGENT_SHA256:
+            raise ValueError('Existing keyboard agent differs from the reviewed build')
+    else:
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                output.write(data)
+            os.chmod(target, 0o755)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+    return trusted_executable(target)
+
 def command_profile(binaries):
     return {name.removeprefix('fprintd-') + '_command': path for name, path in binaries.items()}
 
@@ -147,6 +203,8 @@ def run(action, home, bin_dir, game_mode_auth_agent=None):
         profile = command_profile(binaries)
         if game_mode_auth_agent:
             profile['game_mode_auth_agent'] = trusted_executable(game_mode_auth_agent)
+        elif supported_keyboard_runtime():
+            profile['game_mode_auth_agent'] = install_bundled_agent()
         payload['profile.json'] = (json.dumps(profile, indent=2) + '\n').encode()
     if action == 'install' and old is not None:
         for name in set(payload) | set(old):

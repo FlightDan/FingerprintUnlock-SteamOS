@@ -107,6 +107,35 @@ class InstallTests(unittest.TestCase):
         profile = json.loads((self.target / 'profile.json').read_text())
         self.assertEqual(profile['game_mode_auth_agent'], str(agent.resolve()))
 
+    def test_supported_runtime_enables_bundled_agent_and_override_wins(self):
+        agent = str(self.bin / 'bundled-agent')
+        with patch.object(installer, 'supported_keyboard_runtime', return_value=True), \
+             patch.object(installer, 'install_bundled_agent', return_value=agent) as bundled:
+            self.run_action('install')
+            profile = json.loads((self.target / 'profile.json').read_text())
+            self.assertEqual(profile['game_mode_auth_agent'], agent)
+            bundled.assert_called_once_with()
+            override = self.bin / 'override-agent'
+            override.write_text('fixture')
+            installer.run('install', self.home, self.bin, override)
+            profile = json.loads((self.target / 'profile.json').read_text())
+            self.assertEqual(profile['game_mode_auth_agent'], str(override.resolve()))
+            bundled.assert_called_once_with()
+
+    def test_runtime_compatibility_requires_all_pinned_packages(self):
+        release = 'ID=steamos\nVERSION_ID=3.10\n'
+        packages = ('qt6-base 6.11.1-1\nqt6-declarative 6.11.1-3\n'
+                    'qt6-virtualkeyboard 6.11.1-1\npolkit-kde-agent 6.7.3-1\n'
+                    'kcoreaddons 6.28.0-1\nkdbusaddons 6.28.0-1\nkirigami 6.28.0-1\n')
+        with patch.object(Path, 'read_text', return_value=release), \
+             patch.object(installer, 'command', return_value=Result(stdout=packages)) as query:
+            self.assertTrue(installer.supported_keyboard_runtime())
+            query.return_value.stdout = packages.replace('qt6-base 6.11.1', 'qt6-base 6.12.0')
+            self.assertFalse(installer.supported_keyboard_runtime())
+            query.return_value.stdout = packages.replace('kirigami 6.28.0-1\n', '')
+            self.assertFalse(installer.supported_keyboard_runtime())
+        with patch.object(Path, 'read_text', return_value='ID=other\nVERSION_ID=3.10\n'):
+            self.assertFalse(installer.supported_keyboard_runtime())
     def test_standard_install_uses_zip_profile_when_stock_tools_are_missing(self):
         with patch.object(installer, 'trusted_executable', side_effect=FileNotFoundError):
             installer.run('install', self.home, installer.STOCK_BIN_DIR)

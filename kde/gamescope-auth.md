@@ -24,14 +24,22 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/
 cmake --build build --target polkit-kde-authentication-agent-1
 ```
 
-The resulting executable is `build/bin/polkit-kde-authentication-agent-1`.
-Install it at a separate root-owned executable path with root-owned,
-non-writable ancestors. Pass that path to `install.sh --game-mode-auth-agent`
-when installing or upgrading the standalone plugin. The bridge opens that
-agent as the active Steam user in Game Mode when an agent is required. Tap the
-password field to show the keyboard below the controls. The root-owned copy is
-managed by the administrator who supplies the option. Uninstalling the plugin
-removes its configuration entry.
+The bundled executable `kde/polkit-kde-authentication-agent-1-6.7.3` is the
+158952-byte build with SHA-256
+`959ef59018df7696a101479276b817faee5066d61eaae9b1ae51fa8776417d5f`.
+The source commit, patch, build instructions and GPL license are provided here.
+It was tested on SteamOS 3.10 with Qt 6.11.1 and KDE Frameworks 6.28.0;
+the password field initially gains focus and displays the keyboard automatically.
 
+The sudo standalone installer checks the SteamOS, Qt, KDE, agent and virtual
+keyboard package versions before selecting this build by default. It installs a
+separate immutable, root-owned copy under `/var/lib/boiler-fingerprint-standalone/`;
+it does not replace the system agent. The copy remains as a shared cache after
+uninstall. Unsupported systems continue to use the stock agent. An administrator
+can build the source above and supply a trusted root-owned executable using
+`--game-mode-auth-agent /path/to/agent` to override the default. The Decky-only
+ZIP is lightweight and does not install this privileged copy: use `sudo sh
+install.sh` for the automatic keyboard. The bridge launches the agent as the
+active Steam user, and KDE and Polkit handle the password and authorization.
 The KDE authorization agent patch is licensed under
 [GPL-2.0-or-later](COPYING-GPL-2.0). The pinned KDE source retains the original notices.
