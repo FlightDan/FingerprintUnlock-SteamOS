@@ -25,8 +25,8 @@
     },
     {
       "path": "COPYING-GPL-2.0",
-      "size": 17588,
-      "sha256": "b5b071ebd2c1f65c027641a4e182b3eb1323b602cd119111a309f46092bb42a7"
+      "size": 17277,
+      "sha256": "b58671fb4d9e9efeb9a6af1bdba02e61ac69af654855b45a372efe8f52413f83"
     },
     {
       "path": "gamescope-auth.patch",
