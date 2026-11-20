@@ -136,6 +136,26 @@ class InstallTests(unittest.TestCase):
             self.assertFalse(installer.supported_keyboard_runtime())
         with patch.object(Path, 'read_text', return_value='ID=other\nVERSION_ID=3.10\n'):
             self.assertFalse(installer.supported_keyboard_runtime())
+    def test_check_verifies_managed_agent_but_not_external_override(self):
+        agent = self.bin / installer.AGENT_NAME
+        agent.write_bytes(b'reviewed fixture')
+        with patch.object(installer, 'AGENT_DIR', self.bin), \
+             patch.object(installer, 'BUNDLED_AGENT_SHA256', installer.sha(b'reviewed fixture')), \
+             patch.object(installer, 'supported_keyboard_runtime', return_value=True), \
+             patch.object(installer, 'install_bundled_agent', return_value=str(agent)):
+            self.run_action('install')
+            self.run_action('check')
+            agent.write_bytes(b'modified')
+            with self.assertRaisesRegex(ValueError, 'differs from the reviewed build'):
+                self.run_action('check')
+            agent.unlink()
+            with self.assertRaisesRegex(ValueError, 'missing or inaccessible'):
+                self.run_action('check')
+            external = self.bin / 'external'
+            external.write_bytes(b'administrator managed')
+            installer.run('install', self.home, self.bin, external)
+            external.unlink()
+            self.run_action('check')
     def test_standard_install_uses_zip_profile_when_stock_tools_are_missing(self):
         with patch.object(installer, 'trusted_executable', side_effect=FileNotFoundError):
             installer.run('install', self.home, installer.STOCK_BIN_DIR)

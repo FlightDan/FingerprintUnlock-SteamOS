@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "kind": "BoilerFingerprintKeyboardSource",
+  "source": {
+    "repository": "KDE/polkit-kde-agent-1",
+    "commit": "851bc2547ac6a9f0bdf072d642b17119906496ad",
+    "tag": "v6.7.3"
+  },
+  "patch_source": {
+    "repository": "FlightDan/FingerprintUnlock-SteamOS",
+    "commit": "5f7f988f645c08f9a1837ddcaa1d66b776ca7df6",
+    "path": "kde/gamescope-auth.patch"
+  },
+  "build": {
+    "distribution": "Arch Linux Archive 2026-07-16",
+    "architecture": "x86_64",
+    "qt": "6.11.1",
+    "kde_frameworks": "6.28.0"
+  },
+  "files": [
+    {
+      "path": "polkit-kde-authentication-agent-1-6.7.3",
+      "size": 158952,
+      "sha256": "959ef59018df7696a101479276b817faee5066d61eaae9b1ae51fa8776417d5f"
+    },
+    {
+      "path": "COPYING-GPL-2.0",
+      "size": 17588,
+      "sha256": "b5b071ebd2c1f65c027641a4e182b3eb1323b602cd119111a309f46092bb42a7"
+    },
+    {
+      "path": "gamescope-auth.patch",
+      "size": 4630,
+      "sha256": "73e26b4c1d0fa11aae33e21da33218a47dfdf1e1750583f67fb4fcb2bdfc72a4"
+    },
+    {
+      "path": "gamescope-auth.md",
+      "size": 2782,
+      "sha256": "63c8a6c1260a28dfc95f075c8eb23a524c6612f1f49e7e6b1b6d1859cc4f06dd"
+    },
+    {
+      "path": "polkit-kde-agent-1-v6.7.3-source.tar.gz",
+      "size": 70722,
+      "sha256": "fcd7e923aa09c6f897a61fe502e772c81978b125dd4c505a64b07a184c232659"
+    }
+  ]
+}

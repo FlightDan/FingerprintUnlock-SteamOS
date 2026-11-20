@@ -15,11 +15,11 @@ and KDE versions before using a binary from this build. The target also
 requires the Qt 6 Virtual Keyboard runtime.
 
 ```sh
-git clone --branch v6.7.3 --depth 1 https://github.com/KDE/polkit-kde-agent-1.git
-cd polkit-kde-agent-1
-test "$(git rev-parse HEAD)" = 851bc2547ac6a9f0bdf072d642b17119906496ad
-git apply --check /path/to/FingerprintUnlock-SteamOS/kde/gamescope-auth.patch
-git apply /path/to/FingerprintUnlock-SteamOS/kde/gamescope-auth.patch
+# Run from the repository root; the archive is a git archive of the pinned KDE commit.
+echo 'fcd7e923aa09c6f897a61fe502e772c81978b125dd4c505a64b07a184c232659  kde/polkit-kde-agent-1-v6.7.3-source.tar.gz' | sha256sum -c -
+tar -xzf kde/polkit-kde-agent-1-v6.7.3-source.tar.gz
+cd polkit-kde-agent-1-6.7.3
+patch -p1 < ../kde/gamescope-auth.patch
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=OFF
 cmake --build build --target polkit-kde-authentication-agent-1
 ```
@@ -27,7 +27,7 @@ cmake --build build --target polkit-kde-authentication-agent-1
 The bundled executable `kde/polkit-kde-authentication-agent-1-6.7.3` is the
 158952-byte build with SHA-256
 `959ef59018df7696a101479276b817faee5066d61eaae9b1ae51fa8776417d5f`.
-The source commit, patch, build instructions and GPL license are provided here.
+The corresponding source archive, patch, build instructions, license and source lock are provided in this directory.
 It was tested on SteamOS 3.10 with Qt 6.11.1 and KDE Frameworks 6.28.0;
 the password field initially gains focus and displays the keyboard automatically.
 

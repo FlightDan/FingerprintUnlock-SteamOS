@@ -193,6 +193,16 @@ def run(action, home, bin_dir, game_mode_auth_agent=None):
         changed = [name for name, digest in old.items() if not regular(target / name) or sha((target / name).read_bytes()) != digest]
         if changed:
             raise ValueError('Installed files missing or changed: ' + ', '.join(changed))
+        if 'profile.json' in old:
+            profile = json.loads((target / 'profile.json').read_text(encoding='utf-8'))
+            agent = str(AGENT_DIR / AGENT_NAME)
+            if profile.get('game_mode_auth_agent') == agent:
+                try:
+                    executable = trusted_executable(agent)
+                    if sha(Path(executable).read_bytes()) != BUNDLED_AGENT_SHA256:
+                        raise ValueError('Managed keyboard agent differs from the reviewed build')
+                except OSError as exc:
+                    raise ValueError('Managed keyboard agent missing or inaccessible') from exc
         print('Decky, fprintd configuration and standalone plugin inventory checked')
         return
     if action == 'uninstall' and old is None:
